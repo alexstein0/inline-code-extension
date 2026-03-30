@@ -30,8 +30,13 @@ export class ModelClient {
         });
 
         if (!response.ok) {
-            log(`ERROR ← ${response.status}: ${response.statusText}`);
-            throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+            let detail = response.statusText;
+            try {
+                const errBody = await response.json() as any;
+                detail = errBody.error || errBody.detail || JSON.stringify(errBody);
+            } catch { /* response wasn't JSON */ }
+            log(`ERROR ← ${response.status}: ${detail}`);
+            throw new Error(`Server returned ${response.status}: ${detail}`);
         }
 
         const data: unknown = await response.json();
