@@ -12,15 +12,10 @@ const insertedTextDecoration = vscode.window.createTextEditorDecorationType({
     borderColor: 'rgba(155, 185, 85, 0.6)',
 });
 
-// Text that will be deleted: red strikethrough + dimmed
+// Text that will be deleted: just strikethrough, keep original color
 const pendingDeleteDecoration = vscode.window.createTextEditorDecorationType({
     textDecoration: 'line-through',
-    color: 'rgba(255, 100, 100, 0.7)',
-    backgroundColor: 'rgba(255, 0, 0, 0.08)',
-    isWholeLine: true,
-    borderWidth: '0 0 0 3px',
-    borderStyle: 'solid',
-    borderColor: 'rgba(255, 100, 100, 0.6)',
+    opacity: '0.6',
 });
 
 export class DecorationRenderer {
