@@ -23,6 +23,10 @@
       {
         "command": "inlineCode.triggerSuggestion",
         "title": "Inline Code: Trigger Suggestion"
+      },
+      {
+        "command": "inlineCode.selectModel",
+        "title": "Inline Code: Select Model"
       }
     ],
     "keybindings": [

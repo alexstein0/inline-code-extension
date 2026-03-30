@@ -38,6 +38,27 @@ export class ModelClient {
         }
     }
 
+    async listModels(): Promise<{models: {name: string, description: string, format: string}[], current: string}> {
+        try {
+            const url = `${this.getServerUrl()}/models`;
+            const response = await fetch(url);
+            if (!response.ok) { return {models: [], current: 'unknown'}; }
+            return await response.json() as any;
+        } catch {
+            return {models: [], current: 'unknown'};
+        }
+    }
+
+    async switchModel(modelName: string): Promise<{status: string, model?: string, description?: string}> {
+        const url = `${this.getServerUrl()}/switch-model`;
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model_name: modelName }),
+        });
+        return await response.json() as any;
+    }
+
     async healthCheck(): Promise<boolean> {
         try {
             const url = `${this.getServerUrl()}/health`;
