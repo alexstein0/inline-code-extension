@@ -1,137 +1,163 @@
 import * as vscode from 'vscode';
 import { Suggestion } from './types';
 
-// Strikethrough for deleted text
-const deleteDecorationType = vscode.window.createTextEditorDecorationType({
-    textDecoration: 'line-through',
-    opacity: '0.5',
+// Highlight style for inserted/changed text (green-tinted like a diff)
+const insertHighlight = vscode.window.createTextEditorDecorationType({
+    backgroundColor: 'rgba(155, 185, 85, 0.15)',
+    isWholeLine: false,
+});
+
+// Strikethrough for text that will be deleted (only used for replace preview)
+const pendingDeleteHighlight = vscode.window.createTextEditorDecorationType({
+    backgroundColor: 'rgba(255, 0, 0, 0.1)',
+    isWholeLine: false,
 });
 
 export class DecorationRenderer {
     private activeDecorations: vscode.TextEditorDecorationType[] = [];
+    private previewApplied = false;
+    private reverseEdit: (() => Promise<void>) | null = null;
 
-    show(editor: vscode.TextEditor, suggestion: Suggestion): void {
+    /**
+     * Apply the edit to the document and highlight the changed region.
+     * This shows an exact preview — the document looks exactly as it will after Tab.
+     * Returns true if the preview was applied successfully.
+     */
+    async showPreview(editor: vscode.TextEditor, suggestion: Suggestion): Promise<boolean> {
         this.clear(editor);
 
-        // Show the edit preview at the edit location
+        const editPos = new vscode.Position(suggestion.editLine, suggestion.editCol);
+
         switch (suggestion.action) {
-            case 'insert':
-                this.showInsert(editor, suggestion);
-                break;
-            case 'delete':
-                this.showDelete(editor, suggestion);
-                break;
-            case 'replace':
-                this.showReplace(editor, suggestion);
-                break;
-        }
+            case 'insert': {
+                let content = suggestion.content;
+                if (!content) { return false; }
 
-        // If the edit is far from the cursor, show a jump indicator at the cursor
-        this.showJumpIndicator(editor, suggestion);
-    }
+                // When content starts with \n, the model means "insert new lines before editLine".
+                // Transform: strip leading \n, ensure trailing \n so existing line gets pushed down.
+                if (content.startsWith('\n')) {
+                    content = content.slice(1);
+                    if (!content.endsWith('\n')) {
+                        content += '\n';
+                    }
+                }
 
-    clear(editor: vscode.TextEditor): void {
-        editor.setDecorations(deleteDecorationType, []);
-        for (const dec of this.activeDecorations) {
-            editor.setDecorations(dec, []);
-            dec.dispose();
-        }
-        this.activeDecorations = [];
-    }
+                // Apply the insert
+                const success = await editor.edit((eb) => {
+                    eb.insert(editPos, content);
+                }, { undoStopBefore: true, undoStopAfter: true });
 
-    private showInsert(editor: vscode.TextEditor, suggestion: Suggestion): void {
-        const content = suggestion.content;
-        if (!content) { return; }
+                if (!success) { return false; }
 
-        // Show each line of the insert as ghost text.
-        // Line 0: appended as `after` decoration on the edit line (or line above).
-        // Lines 1+: appended as `after` decorations on subsequent lines.
-        const insertLines = content.split('\n');
-        const editLine = suggestion.editLine;
+                // Highlight the inserted region
+                const lines = content.split('\n');
+                const endLine = editPos.line + lines.length - 1;
+                const endCol = lines.length === 1
+                    ? editPos.character + lines[0].length
+                    : lines[lines.length - 1].length;
+                const insertedRange = new vscode.Range(editPos, new vscode.Position(endLine, endCol));
+                editor.setDecorations(insertHighlight, [{ range: insertedRange }]);
 
-        // Attach ghost text to the line where the insert happens.
-        // If inserting at col 0, show on the line above (the BEFORE line).
-        const attachLine = suggestion.editCol === 0 && editLine > 0
-            ? editLine - 1
-            : editLine;
+                this.previewApplied = true;
+                this.reverseEdit = async () => {
+                    await editor.edit((eb) => {
+                        eb.delete(insertedRange);
+                    }, { undoStopBefore: false, undoStopAfter: false });
+                };
+                return true;
+            }
 
-        for (let i = 0; i < insertLines.length; i++) {
-            const text = insertLines[i];
-            if (text === '' && i === insertLines.length - 1) { break; } // skip trailing empty
+            case 'delete': {
+                // For delete, highlight what will be removed (don't actually delete yet)
+                const content = suggestion.content;
+                if (!content) { return false; }
 
-            const targetLine = attachLine + i;
-            if (targetLine >= editor.document.lineCount) { break; }
+                const range = this.calculateRange(editPos, content);
+                editor.setDecorations(pendingDeleteHighlight, [{ range }]);
 
-            const lineEnd = editor.document.lineAt(targetLine).range.end;
-            const prefix = i === 0 ? '  ' : '  '; // visual separator
+                this.previewApplied = false; // not applied yet — applied on accept
+                this.reverseEdit = null;
+                return true;
+            }
 
-            const dec = vscode.window.createTextEditorDecorationType({
-                after: {
-                    contentText: prefix + text,
-                    color: new vscode.ThemeColor('editorGhostText.foreground'),
-                    fontStyle: 'italic',
-                },
-            });
-            this.activeDecorations.push(dec);
-            editor.setDecorations(dec, [{ range: new vscode.Range(lineEnd, lineEnd) }]);
-        }
-    }
+            case 'replace': {
+                const deleteText = suggestion.deleteText;
+                const insertText = suggestion.insertText;
+                if (!deleteText) { return false; }
 
-    private showDelete(editor: vscode.TextEditor, suggestion: Suggestion): void {
-        const content = suggestion.content;
-        if (!content) { return; }
+                // Apply the replacement
+                const deleteRange = this.calculateRange(editPos, deleteText);
+                const success = await editor.edit((eb) => {
+                    eb.replace(deleteRange, insertText || '');
+                }, { undoStopBefore: true, undoStopAfter: true });
 
-        const range = this.calculateRange(suggestion.editLine, suggestion.editCol, content);
-        editor.setDecorations(deleteDecorationType, [{ range }]);
-    }
+                if (!success) { return false; }
 
-    private showReplace(editor: vscode.TextEditor, suggestion: Suggestion): void {
-        const deleteContent = suggestion.deleteText;
-        const insertContent = suggestion.insertText;
-        if (!deleteContent) { return; }
+                // Highlight the new text
+                const newLines = (insertText || '').split('\n');
+                const endLine = editPos.line + newLines.length - 1;
+                const endCol = newLines.length === 1
+                    ? editPos.character + newLines[0].length
+                    : newLines[newLines.length - 1].length;
+                const insertedRange = new vscode.Range(editPos, new vscode.Position(endLine, endCol));
+                editor.setDecorations(insertHighlight, [{ range: insertedRange }]);
 
-        // Strikethrough on old text
-        const deleteRange = this.calculateRange(suggestion.editLine, suggestion.editCol, deleteContent);
-        editor.setDecorations(deleteDecorationType, [{ range: deleteRange }]);
-
-        // Ghost text for replacement
-        if (insertContent) {
-            const insertLines = insertContent.split('\n');
-
-            for (let i = 0; i < insertLines.length; i++) {
-                const text = insertLines[i];
-                if (text === '' && i === insertLines.length - 1) { break; }
-
-                // First line: after the delete range end. Subsequent: on following lines.
-                const targetLine = deleteRange.end.line + i;
-                if (targetLine >= editor.document.lineCount) { break; }
-
-                const lineEnd = editor.document.lineAt(targetLine).range.end;
-                const prefix = i === 0 ? '  ' : '  ';
-
-                const dec = vscode.window.createTextEditorDecorationType({
-                    after: {
-                        contentText: prefix + text,
-                        color: new vscode.ThemeColor('editorGhostText.foreground'),
-                        fontStyle: 'italic',
-                    },
-                });
-                this.activeDecorations.push(dec);
-                editor.setDecorations(dec, [{ range: new vscode.Range(lineEnd, lineEnd) }]);
+                this.previewApplied = true;
+                this.reverseEdit = async () => {
+                    // Reverse: replace the inserted text back with the deleted text
+                    await editor.edit((eb) => {
+                        eb.replace(insertedRange, deleteText);
+                    }, { undoStopBefore: false, undoStopAfter: false });
+                };
+                return true;
             }
         }
+        return false;
     }
 
-    private showJumpIndicator(editor: vscode.TextEditor, suggestion: Suggestion): void {
+    /**
+     * Accept the preview — just remove decorations (edit is already applied).
+     * For delete action, actually apply the edit now.
+     */
+    async acceptPreview(editor: vscode.TextEditor, suggestion: Suggestion): Promise<void> {
+        if (suggestion.action === 'delete' && !this.previewApplied) {
+            // Delete wasn't applied during preview — apply now
+            const editPos = new vscode.Position(suggestion.editLine, suggestion.editCol);
+            const content = suggestion.content;
+            if (content) {
+                const range = this.calculateRange(editPos, content);
+                await editor.edit((eb) => {
+                    eb.delete(range);
+                });
+            }
+        }
+        this.clear(editor);
+        this.previewApplied = false;
+        this.reverseEdit = null;
+    }
+
+    /**
+     * Dismiss the preview — reverse the edit and remove decorations.
+     */
+    async dismissPreview(editor: vscode.TextEditor): Promise<void> {
+        if (this.previewApplied && this.reverseEdit) {
+            await this.reverseEdit();
+        }
+        this.clear(editor);
+        this.previewApplied = false;
+        this.reverseEdit = null;
+    }
+
+    /** Show a jump indicator at the cursor when the edit is far away. */
+    showJumpIndicator(editor: vscode.TextEditor, suggestion: Suggestion): void {
         const cursorLine = editor.selection.active.line;
         const editLine = suggestion.editLine;
         const distance = Math.abs(editLine - cursorLine);
 
-        // Only show indicator if the edit is more than 2 lines away
         if (distance <= 2) { return; }
 
         const direction = editLine > cursorLine ? '↓' : '↑';
-        const lineNum = editLine + 1; // display as 1-indexed
+        const lineNum = editLine + 1;
         const label = `  ${direction} Tab → line ${lineNum}`;
 
         const cursorEnd = editor.document.lineAt(cursorLine).range.end;
@@ -147,16 +173,26 @@ export class DecorationRenderer {
         editor.setDecorations(dec, [{ range: new vscode.Range(cursorEnd, cursorEnd) }]);
     }
 
-    private calculateRange(startLine: number, startCol: number, content: string): vscode.Range {
-        const lines = content.split('\n');
-        const endLine = startLine + lines.length - 1;
-        const endCol = lines.length === 1
-            ? startCol + lines[0].length
-            : lines[lines.length - 1].length;
+    clear(editor: vscode.TextEditor): void {
+        editor.setDecorations(insertHighlight, []);
+        editor.setDecorations(pendingDeleteHighlight, []);
+        for (const dec of this.activeDecorations) {
+            editor.setDecorations(dec, []);
+            dec.dispose();
+        }
+        this.activeDecorations = [];
+    }
 
-        return new vscode.Range(
-            new vscode.Position(startLine, startCol),
-            new vscode.Position(endLine, endCol)
-        );
+    get isPreviewApplied(): boolean {
+        return this.previewApplied;
+    }
+
+    private calculateRange(start: vscode.Position, content: string): vscode.Range {
+        const lines = content.split('\n');
+        const endLine = start.line + lines.length - 1;
+        const endCol = lines.length === 1
+            ? start.character + lines[0].length
+            : lines[lines.length - 1].length;
+        return new vscode.Range(start, new vscode.Position(endLine, endCol));
     }
 }
