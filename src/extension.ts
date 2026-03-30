@@ -26,21 +26,15 @@ async function updateStatusBar() {
 async function autoSelectDefaultModel() {
     try {
         const info = await modelClient.listModels();
-        if (info.current && info.current !== 'unknown') { return; } // already loaded
-        if (info.models.length === 0) { return; }
-
-        // Pick the first model as default
-        const defaultModel = info.models[0].name;
-        outputChannel.appendLine(`[InlineCode] No model loaded — auto-selecting "${defaultModel}"`);
-
-        const result = await modelClient.switchModel(defaultModel);
-        if (result.status === 'ok') {
-            outputChannel.appendLine(`[InlineCode] Loaded default model: ${result.model} (${result.format})`);
-        } else {
-            outputChannel.appendLine(`[InlineCode] Failed to load default model: ${JSON.stringify(result)}`);
+        if (info.current && info.current !== 'unknown') {
+            outputChannel.appendLine(`[InlineCode] Server has model loaded: ${info.current}`);
+            return;
         }
+        // No model loaded — just report it, don't auto-switch
+        // (the server may be using Ollama backend which doesn't support /switch-model)
+        outputChannel.appendLine(`[InlineCode] No model loaded on server — click the status bar to select one`);
     } catch (e: any) {
-        outputChannel.appendLine(`[InlineCode] Could not auto-select model: ${e.message}`);
+        outputChannel.appendLine(`[InlineCode] Could not reach server: ${e.message}`);
     }
 }
 
