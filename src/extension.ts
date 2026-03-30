@@ -134,6 +134,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('inlineCode.selectModel', selectModel)
     );
 
+    outputChannel.appendLine('[InlineCode] Extension activated — listening for cursor events.');
     console.log('[InlineCode] Extension activated.');
 }
 

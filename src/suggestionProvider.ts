@@ -14,6 +14,7 @@ export class SuggestionProvider {
     private debounceTimer: ReturnType<typeof setTimeout> | null = null;
     private requestSeq = 0;
     private abortController: AbortController | null = null;
+    private requestInFlight = false;
     private changeHistory: HistoryStep[] = [];
     private lastEditLine: number | null = null;
     private isApplyingEdit = false;
@@ -25,11 +26,12 @@ export class SuggestionProvider {
 
         vscode.commands.executeCommand('setContext', 'inlineCode.suggestionVisible', false);
 
-        // Trigger predictions on cursor movement
+        // Trigger predictions on cursor movement (but not if a request is already in flight)
         context.subscriptions.push(
             vscode.window.onDidChangeTextEditorSelection((e) => {
                 if (!this.isEnabled() || this.isApplyingEdit || this.isShowingPreview) { return; }
                 if (!this.isSupportedDocument(e.textEditor.document)) { return; }
+                if (this.requestInFlight) { return; }
                 this.schedulePrediction(e.textEditor);
             })
         );
@@ -97,7 +99,9 @@ export class SuggestionProvider {
         };
 
         try {
+            this.requestInFlight = true;
             const response = await this.client.predict(request, this.abortController.signal);
+            this.requestInFlight = false;
 
             if (seq !== this.requestSeq) { return; }
 
@@ -112,6 +116,7 @@ export class SuggestionProvider {
             this.changeQueue = suggestions.slice(1);
             await this.showSuggestion(editor, suggestions[0]);
         } catch (err: unknown) {
+            this.requestInFlight = false;
             if (err instanceof Error && err.name === 'AbortError') { return; }
             console.error('[InlineCode] Prediction failed:', err);
         }
