@@ -5,6 +5,7 @@ import { ModelClient } from './modelClient';
 let provider: SuggestionProvider | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
 const modelClient = new ModelClient();
+export let outputChannel: vscode.OutputChannel;
 
 async function updateStatusBar() {
     if (!statusBarItem) { return; }
@@ -57,6 +58,12 @@ async function selectModel() {
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('[InlineCode] Extension activating...');
+
+    // Create output channel for logging (View → Output → "Inline Code")
+    outputChannel = vscode.window.createOutputChannel('Inline Code');
+    context.subscriptions.push(outputChannel);
+    outputChannel.appendLine('[InlineCode] Extension activating...');
+    outputChannel.show(true); // Show output panel on startup
 
     provider = new SuggestionProvider(context);
 
