@@ -1,16 +1,26 @@
 import * as vscode from 'vscode';
 import { Suggestion } from './types';
 
-// Highlight style for inserted/changed text (green-tinted like a diff)
-const insertHighlight = vscode.window.createTextEditorDecorationType({
-    backgroundColor: 'rgba(155, 185, 85, 0.15)',
-    isWholeLine: false,
+// Inserted text: ghost-text style (dimmed, italic) + green left gutter bar
+const insertedTextDecoration = vscode.window.createTextEditorDecorationType({
+    color: new vscode.ThemeColor('editorGhostText.foreground'),
+    fontStyle: 'italic',
+    backgroundColor: 'rgba(155, 185, 85, 0.08)',
+    isWholeLine: true,
+    borderWidth: '0 0 0 3px',
+    borderStyle: 'solid',
+    borderColor: 'rgba(155, 185, 85, 0.6)',
 });
 
-// Strikethrough for text that will be deleted (only used for replace preview)
-const pendingDeleteHighlight = vscode.window.createTextEditorDecorationType({
-    backgroundColor: 'rgba(255, 0, 0, 0.1)',
-    isWholeLine: false,
+// Text that will be deleted: red strikethrough + dimmed
+const pendingDeleteDecoration = vscode.window.createTextEditorDecorationType({
+    textDecoration: 'line-through',
+    color: 'rgba(255, 100, 100, 0.7)',
+    backgroundColor: 'rgba(255, 0, 0, 0.08)',
+    isWholeLine: true,
+    borderWidth: '0 0 0 3px',
+    borderStyle: 'solid',
+    borderColor: 'rgba(255, 100, 100, 0.6)',
 });
 
 export class DecorationRenderer {
@@ -20,7 +30,7 @@ export class DecorationRenderer {
 
     /**
      * Apply the edit to the document and highlight the changed region.
-     * This shows an exact preview — the document looks exactly as it will after Tab.
+     * Inserted text is styled like ghost text (dimmed + italic + green gutter).
      * Returns true if the preview was applied successfully.
      */
     async showPreview(editor: vscode.TextEditor, suggestion: Suggestion): Promise<boolean> {
@@ -49,14 +59,9 @@ export class DecorationRenderer {
 
                 if (!success) { return false; }
 
-                // Highlight the inserted region
-                const lines = content.split('\n');
-                const endLine = editPos.line + lines.length - 1;
-                const endCol = lines.length === 1
-                    ? editPos.character + lines[0].length
-                    : lines[lines.length - 1].length;
-                const insertedRange = new vscode.Range(editPos, new vscode.Position(endLine, endCol));
-                editor.setDecorations(insertHighlight, [{ range: insertedRange }]);
+                // Highlight each inserted line with ghost-text styling
+                const insertedRange = this.calculateRange(editPos, content);
+                this.decorateInsertedLines(editor, editPos.line, insertedRange.end.line, content);
 
                 this.previewApplied = true;
                 this.reverseEdit = async () => {
@@ -73,7 +78,7 @@ export class DecorationRenderer {
                 if (!content) { return false; }
 
                 const range = this.calculateRange(editPos, content);
-                editor.setDecorations(pendingDeleteHighlight, [{ range }]);
+                editor.setDecorations(pendingDeleteDecoration, [{ range }]);
 
                 this.previewApplied = false; // not applied yet — applied on accept
                 this.reverseEdit = null;
@@ -93,18 +98,12 @@ export class DecorationRenderer {
 
                 if (!success) { return false; }
 
-                // Highlight the new text
-                const newLines = (insertText || '').split('\n');
-                const endLine = editPos.line + newLines.length - 1;
-                const endCol = newLines.length === 1
-                    ? editPos.character + newLines[0].length
-                    : newLines[newLines.length - 1].length;
-                const insertedRange = new vscode.Range(editPos, new vscode.Position(endLine, endCol));
-                editor.setDecorations(insertHighlight, [{ range: insertedRange }]);
+                // Highlight the new text with ghost-text styling
+                const insertedRange = this.calculateRange(editPos, insertText || '');
+                this.decorateInsertedLines(editor, editPos.line, insertedRange.end.line, insertText || '');
 
                 this.previewApplied = true;
                 this.reverseEdit = async () => {
-                    // Reverse: replace the inserted text back with the deleted text
                     await editor.edit((eb) => {
                         eb.replace(insertedRange, deleteText);
                     }, { undoStopBefore: false, undoStopAfter: false });
@@ -174,8 +173,8 @@ export class DecorationRenderer {
     }
 
     clear(editor: vscode.TextEditor): void {
-        editor.setDecorations(insertHighlight, []);
-        editor.setDecorations(pendingDeleteHighlight, []);
+        editor.setDecorations(insertedTextDecoration, []);
+        editor.setDecorations(pendingDeleteDecoration, []);
         for (const dec of this.activeDecorations) {
             editor.setDecorations(dec, []);
             dec.dispose();
@@ -185,6 +184,23 @@ export class DecorationRenderer {
 
     get isPreviewApplied(): boolean {
         return this.previewApplied;
+    }
+
+    /**
+     * Apply ghost-text styling to inserted lines.
+     * Each line gets: dimmed color, italic, green left gutter bar.
+     */
+    private decorateInsertedLines(editor: vscode.TextEditor, startLine: number, endLine: number, content: string): void {
+        const ranges: vscode.Range[] = [];
+        // If content ends with \n, the last "line" in the split is empty — don't decorate it
+        const lastLine = content.endsWith('\n') ? endLine - 1 : endLine;
+        for (let line = startLine; line <= lastLine && line < editor.document.lineCount; line++) {
+            const lineRange = editor.document.lineAt(line).range;
+            ranges.push(lineRange);
+        }
+        if (ranges.length > 0) {
+            editor.setDecorations(insertedTextDecoration, ranges);
+        }
     }
 
     private calculateRange(start: vscode.Position, content: string): vscode.Range {
