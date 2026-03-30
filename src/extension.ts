@@ -11,10 +11,36 @@ async function updateStatusBar() {
     if (!statusBarItem) { return; }
     try {
         const info = await modelClient.listModels();
-        statusBarItem.text = `$(hubot) ${info.current}`;
-        statusBarItem.tooltip = 'Click to switch inline code model';
+        if (info.current && info.current !== 'unknown') {
+            statusBarItem.text = `$(hubot) ${info.current}`;
+            statusBarItem.tooltip = 'Click to switch inline code model';
+        } else {
+            statusBarItem.text = `$(hubot) Select Model`;
+            statusBarItem.tooltip = 'No model loaded — click to select one';
+        }
     } catch {
         statusBarItem.text = '$(hubot) disconnected';
+    }
+}
+
+async function autoSelectDefaultModel() {
+    try {
+        const info = await modelClient.listModels();
+        if (info.current && info.current !== 'unknown') { return; } // already loaded
+        if (info.models.length === 0) { return; }
+
+        // Pick the first model as default
+        const defaultModel = info.models[0].name;
+        outputChannel.appendLine(`[InlineCode] No model loaded — auto-selecting "${defaultModel}"`);
+
+        const result = await modelClient.switchModel(defaultModel);
+        if (result.status === 'ok') {
+            outputChannel.appendLine(`[InlineCode] Loaded default model: ${result.model} (${result.format})`);
+        } else {
+            outputChannel.appendLine(`[InlineCode] Failed to load default model: ${JSON.stringify(result)}`);
+        }
+    } catch (e: any) {
+        outputChannel.appendLine(`[InlineCode] Could not auto-select model: ${e.message}`);
     }
 }
 
@@ -72,7 +98,9 @@ export function activate(context: vscode.ExtensionContext) {
     statusBarItem.command = 'inlineCode.selectModel';
     statusBarItem.show();
     context.subscriptions.push(statusBarItem);
-    updateStatusBar();
+
+    // Auto-select default model if none is loaded
+    autoSelectDefaultModel().then(() => updateStatusBar());
 
     // Register commands
     context.subscriptions.push(

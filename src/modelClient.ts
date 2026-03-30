@@ -18,12 +18,14 @@ export class ModelClient {
 
     async predict(request: PredictRequest, signal?: AbortSignal): Promise<PredictResponse> {
         const url = `${this.getServerUrl()}/predict`;
+        const body = JSON.stringify(request);
         log(`REQUEST → cursor=${request.cursor_line}:${request.cursor_col} history=${request.history.length} steps, file=${request.file_content.length} chars`);
+        log(`  ▸ Request body: ${body.length > 500 ? body.slice(0, 500) + '...' : body}`);
 
         const response = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(request),
+            body,
             signal,
         });
 
@@ -33,6 +35,7 @@ export class ModelClient {
         }
 
         const data: unknown = await response.json();
+        log(`  ▸ Raw response: ${JSON.stringify(data)}`);
         const result = parseResponse(data);
         log(`RESPONSE ← ${result.changes.length} change(s)${result.changes.length > 0 ? ': ' + result.changes.map(c => `${c.action} L${c.line}`).join(', ') : ''}`);
         return result;
