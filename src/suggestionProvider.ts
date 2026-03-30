@@ -150,6 +150,28 @@ export class SuggestionProvider {
         this.renderer.clear(editor);
         await this.applyEdit(editor, suggestion);
 
+        // Move cursor to the end of the edit
+        const editPos = new vscode.Position(suggestion.editLine, suggestion.editCol);
+        let cursorPos: vscode.Position;
+        if (suggestion.action === 'insert' && suggestion.content) {
+            const lines = suggestion.content.split('\n');
+            const endLine = editPos.line + lines.length - 1;
+            const endCol = lines.length === 1
+                ? editPos.character + lines[0].length
+                : lines[lines.length - 1].length;
+            cursorPos = new vscode.Position(endLine, endCol);
+        } else if (suggestion.action === 'replace' && suggestion.insertText) {
+            const lines = suggestion.insertText.split('\n');
+            const endLine = editPos.line + lines.length - 1;
+            const endCol = lines.length === 1
+                ? editPos.character + lines[0].length
+                : lines[lines.length - 1].length;
+            cursorPos = new vscode.Position(endLine, endCol);
+        } else {
+            cursorPos = editPos;
+        }
+        editor.selection = new vscode.Selection(cursorPos, cursorPos);
+
         this.recordChange(suggestion);
         this.client.notify('accept', suggestion.action, suggestion.editLine + 1);
         console.log(`[InlineCode] Accepted: ${suggestion.action} at L${suggestion.editLine + 1}`);
