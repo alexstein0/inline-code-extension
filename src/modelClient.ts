@@ -49,7 +49,7 @@ export class ModelClient {
         }
     }
 
-    async switchModel(modelName: string): Promise<{status: string, model?: string, description?: string}> {
+    async switchModel(modelName: string): Promise<{status: string, model?: string, description?: string, format?: string}> {
         const url = `${this.getServerUrl()}/switch-model`;
         const response = await fetch(url, {
             method: 'POST',
