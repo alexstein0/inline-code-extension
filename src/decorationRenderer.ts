@@ -85,34 +85,24 @@ export class DecorationRenderer {
                 const insertText = suggestion.insertText || '';
                 if (!deleteText) { return false; }
 
-                // Don't apply yet — show old text with strikethrough, new text as ghost
+                // Apply the replacement so new text is real and properly laid out
                 const deleteRange = this.calculateRange(editPos, deleteText);
-                editor.setDecorations(pendingDeleteDecoration, [{ range: deleteRange }]);
+                const success = await editor.edit((eb) => {
+                    eb.replace(deleteRange, insertText);
+                }, { undoStopBefore: true, undoStopAfter: true });
 
-                // Show new text as ghost text after the old text
-                const deleteEndLine = deleteRange.end.line;
-                const lineEnd = editor.document.lineAt(deleteEndLine).range.end;
-                const newLines = insertText.split('\n');
-                // Show first line inline after the deleted text, rest on subsequent lines
-                for (let i = 0; i < newLines.length; i++) {
-                    const text = newLines[i];
-                    if (text === '' && i === newLines.length - 1) { break; }
-                    const targetLine = deleteEndLine + i;
-                    if (targetLine >= editor.document.lineCount) { break; }
-                    const attachEnd = i === 0 ? lineEnd : editor.document.lineAt(targetLine).range.end;
-                    const dec = vscode.window.createTextEditorDecorationType({
-                        after: {
-                            contentText: (i === 0 ? '  →  ' : '    ') + text,
-                            color: new vscode.ThemeColor('editorGhostText.foreground'),
-                            fontStyle: 'italic',
-                        },
-                    });
-                    this.activeDecorations.push(dec);
-                    editor.setDecorations(dec, [{ range: new vscode.Range(attachEnd, attachEnd) }]);
-                }
+                if (!success) { return false; }
 
-                this.previewApplied = false; // not applied yet — applied on accept
-                this.reverseEdit = null;
+                // Highlight the new text with ghost-text styling (green gutter + dimmed)
+                const insertedRange = this.calculateRange(editPos, insertText);
+                this.decorateInsertedLines(editor, editPos.line, insertedRange.end.line, insertText);
+
+                this.previewApplied = true;
+                this.reverseEdit = async () => {
+                    await editor.edit((eb) => {
+                        eb.replace(this.calculateRange(editPos, insertText), deleteText);
+                    }, { undoStopBefore: false, undoStopAfter: false });
+                };
                 return true;
             }
         }
