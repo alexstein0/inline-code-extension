@@ -82,27 +82,37 @@ export class DecorationRenderer {
 
             case 'replace': {
                 const deleteText = suggestion.deleteText;
-                const insertText = suggestion.insertText;
+                const insertText = suggestion.insertText || '';
                 if (!deleteText) { return false; }
 
-                // Apply the replacement
+                // Don't apply yet — show old text with strikethrough, new text as ghost
                 const deleteRange = this.calculateRange(editPos, deleteText);
-                const success = await editor.edit((eb) => {
-                    eb.replace(deleteRange, insertText || '');
-                }, { undoStopBefore: true, undoStopAfter: true });
+                editor.setDecorations(pendingDeleteDecoration, [{ range: deleteRange }]);
 
-                if (!success) { return false; }
+                // Show new text as ghost text after the old text
+                const deleteEndLine = deleteRange.end.line;
+                const lineEnd = editor.document.lineAt(deleteEndLine).range.end;
+                const newLines = insertText.split('\n');
+                // Show first line inline after the deleted text, rest on subsequent lines
+                for (let i = 0; i < newLines.length; i++) {
+                    const text = newLines[i];
+                    if (text === '' && i === newLines.length - 1) { break; }
+                    const targetLine = deleteEndLine + i;
+                    if (targetLine >= editor.document.lineCount) { break; }
+                    const attachEnd = i === 0 ? lineEnd : editor.document.lineAt(targetLine).range.end;
+                    const dec = vscode.window.createTextEditorDecorationType({
+                        after: {
+                            contentText: (i === 0 ? '  →  ' : '    ') + text,
+                            color: new vscode.ThemeColor('editorGhostText.foreground'),
+                            fontStyle: 'italic',
+                        },
+                    });
+                    this.activeDecorations.push(dec);
+                    editor.setDecorations(dec, [{ range: new vscode.Range(attachEnd, attachEnd) }]);
+                }
 
-                // Highlight the new text with ghost-text styling
-                const insertedRange = this.calculateRange(editPos, insertText || '');
-                this.decorateInsertedLines(editor, editPos.line, insertedRange.end.line, insertText || '');
-
-                this.previewApplied = true;
-                this.reverseEdit = async () => {
-                    await editor.edit((eb) => {
-                        eb.replace(insertedRange, deleteText);
-                    }, { undoStopBefore: false, undoStopAfter: false });
-                };
+                this.previewApplied = false; // not applied yet — applied on accept
+                this.reverseEdit = null;
                 return true;
             }
         }
@@ -114,14 +124,17 @@ export class DecorationRenderer {
      * For delete action, actually apply the edit now.
      */
     async acceptPreview(editor: vscode.TextEditor, suggestion: Suggestion): Promise<void> {
-        if (suggestion.action === 'delete' && !this.previewApplied) {
-            // Delete wasn't applied during preview — apply now
+        if (!this.previewApplied) {
             const editPos = new vscode.Position(suggestion.editLine, suggestion.editCol);
-            const content = suggestion.content;
-            if (content) {
-                const range = this.calculateRange(editPos, content);
+            if (suggestion.action === 'delete' && suggestion.content) {
+                const range = this.calculateRange(editPos, suggestion.content);
                 await editor.edit((eb) => {
                     eb.delete(range);
+                });
+            } else if (suggestion.action === 'replace' && suggestion.deleteText) {
+                const range = this.calculateRange(editPos, suggestion.deleteText);
+                await editor.edit((eb) => {
+                    eb.replace(range, suggestion.insertText || '');
                 });
             }
         }
