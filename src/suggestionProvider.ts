@@ -26,11 +26,14 @@ export class SuggestionProvider {
 
         vscode.commands.executeCommand('setContext', 'inlineCode.suggestionVisible', false);
 
-        // Trigger predictions on cursor movement (but not if a request is already in flight)
+        // Dismiss on cursor movement, then schedule a new prediction
         context.subscriptions.push(
             vscode.window.onDidChangeTextEditorSelection((e) => {
                 if (!this.isEnabled() || this.isApplyingEdit || this.isShowingPreview) { return; }
                 if (!this.isSupportedDocument(e.textEditor.document)) { return; }
+                if (this.currentSuggestion) {
+                    this.dismissSuggestion(e.textEditor);
+                }
                 if (this.requestInFlight) { return; }
                 this.schedulePrediction(e.textEditor);
             })
