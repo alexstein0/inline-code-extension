@@ -4,7 +4,9 @@ import { DecorationRenderer } from './decorationRenderer';
 import { Suggestion, PredictRequest, HistoryStep, changeToSuggestion } from './types';
 
 const MAX_HISTORY = 5;
-const CURSOR_JUMP_THRESHOLD = 10; // lines — reset history if cursor jumps further than this
+const CURSOR_JUMP_THRESHOLD = 10;
+const EDIT_DEBOUNCE_MS = 1000;      // 1s after typing
+const CURSOR_DEBOUNCE_MS = 2000;    // 2s after cursor-only movement
 
 export class SuggestionProvider {
     private client: ModelClient;
@@ -17,8 +19,7 @@ export class SuggestionProvider {
     private requestInFlight = false;
     private changeHistory: HistoryStep[] = [];
     private lastEditLine: number | null = null;
-    private isApplyingEdit = false;
-    private isShowingPreview = false;
+    private busy = false;  // mutex for accept/dismiss/show operations
 
     constructor(private context: vscode.ExtensionContext) {
         this.client = new ModelClient();
@@ -26,29 +27,36 @@ export class SuggestionProvider {
 
         vscode.commands.executeCommand('setContext', 'inlineCode.suggestionVisible', false);
 
-        // Dismiss on cursor movement, then schedule a new prediction
+        // On cursor movement: dismiss current preview, schedule new prediction
         context.subscriptions.push(
             vscode.window.onDidChangeTextEditorSelection((e) => {
-                if (!this.isEnabled() || this.isApplyingEdit || this.isShowingPreview) { return; }
+                if (!this.isEnabled() || this.busy) { return; }
                 if (!this.isSupportedDocument(e.textEditor.document)) { return; }
-                if (this.currentSuggestion) {
+
+                // Dismiss any active preview
+                if (this.currentSuggestion && this.renderer.isActive) {
                     this.dismissSuggestion(e.textEditor);
+                    return; // don't immediately re-trigger after dismiss
                 }
+
                 if (this.requestInFlight) { return; }
-                this.schedulePrediction(e.textEditor);
+                this.schedulePrediction(e.textEditor, CURSOR_DEBOUNCE_MS);
             })
         );
 
-        // Dismiss on text changes (user is typing)
+        // On text change: dismiss, then schedule with shorter debounce
         context.subscriptions.push(
             vscode.workspace.onDidChangeTextDocument((e) => {
-                if (this.isApplyingEdit || this.isShowingPreview) { return; }
+                if (this.busy) { return; }
                 const editor = vscode.window.activeTextEditor;
-                if (editor && e.document === editor.document && this.isSupportedDocument(e.document)) {
+                if (!editor || e.document !== editor.document) { return; }
+                if (!this.isSupportedDocument(e.document)) { return; }
+
+                if (this.currentSuggestion) {
                     this.dismissSuggestion(editor);
-                    if (this.isEnabled()) {
-                        this.schedulePrediction(editor);
-                    }
+                }
+                if (this.isEnabled()) {
+                    this.schedulePrediction(editor, EDIT_DEBOUNCE_MS);
                 }
             })
         );
@@ -59,24 +67,20 @@ export class SuggestionProvider {
     }
 
     private isSupportedDocument(doc: vscode.TextDocument): boolean {
-        // Only predict for actual files — ignore output panels, terminals, etc.
         return doc.uri.scheme === 'file' || doc.uri.scheme === 'untitled';
     }
 
-    private getDebounceMs(): number {
-        return vscode.workspace.getConfiguration('inlineCode').get<number>('debounceMs', 500);
-    }
-
-    private schedulePrediction(editor: vscode.TextEditor): void {
+    private schedulePrediction(editor: vscode.TextEditor, delayMs: number): void {
         if (this.debounceTimer) {
             clearTimeout(this.debounceTimer);
         }
         this.debounceTimer = setTimeout(() => {
             this.triggerPrediction(editor);
-        }, this.getDebounceMs());
+        }, delayMs);
     }
 
     async triggerPrediction(editor: vscode.TextEditor): Promise<void> {
+        // Abort any in-flight request
         if (this.abortController) {
             this.abortController.abort();
         }
@@ -106,6 +110,7 @@ export class SuggestionProvider {
             const response = await this.client.predict(request, this.abortController.signal);
             this.requestInFlight = false;
 
+            // Stale response — a newer request was fired
             if (seq !== this.requestSeq) { return; }
 
             if (response.changes.length === 0) {
@@ -126,6 +131,9 @@ export class SuggestionProvider {
     }
 
     private async showSuggestion(editor: vscode.TextEditor, suggestion: Suggestion): Promise<void> {
+        if (this.busy) { return; }
+        this.busy = true;
+
         this.currentSuggestion = suggestion;
         vscode.commands.executeCommand('setContext', 'inlineCode.suggestionVisible', true);
 
@@ -135,20 +143,19 @@ export class SuggestionProvider {
             : `"${(suggestion.content || '').slice(0, 50)}"`;
         console.log(`[InlineCode] Showing: ${suggestion.action} at L${suggestion.editLine + 1}:${suggestion.editCol} ${detail}${queueInfo}`);
 
-        // Apply the edit as a live preview (highlighted in the document)
-        this.isShowingPreview = true;
         const applied = await this.renderer.showPreview(editor, suggestion);
-        this.isShowingPreview = false;
 
         if (!applied) {
             console.log('[InlineCode] Failed to apply preview');
             this.currentSuggestion = null;
             vscode.commands.executeCommand('setContext', 'inlineCode.suggestionVisible', false);
+            this.busy = false;
             return;
         }
 
         // Show jump indicator if edit is far from cursor
         this.renderer.showJumpIndicator(editor, suggestion);
+        this.busy = false;
     }
 
     private isEditVisible(editor: vscode.TextEditor, suggestion: Suggestion): boolean {
@@ -160,7 +167,7 @@ export class SuggestionProvider {
 
     async acceptSuggestion(editor: vscode.TextEditor): Promise<void> {
         const suggestion = this.currentSuggestion;
-        if (!suggestion) { return; }
+        if (!suggestion || this.busy) { return; }
 
         // If the edit is off-screen, first Tab scrolls to it
         if (!this.isEditVisible(editor, suggestion)) {
@@ -172,22 +179,16 @@ export class SuggestionProvider {
             return;
         }
 
-        this.isApplyingEdit = true;
+        this.busy = true;
 
-        // Accept the preview — for insert/replace it's already applied, just remove decorations
-        // For delete, this actually applies the deletion
         await this.renderer.acceptPreview(editor, suggestion);
 
         // Move cursor to the end of the edit
         const editPos = new vscode.Position(suggestion.editLine, suggestion.editCol);
         let cursorPos: vscode.Position;
         if (suggestion.action === 'insert' && suggestion.content) {
-            // Apply same normalization as decorationRenderer
-            let content = suggestion.content;
-            if (content.startsWith('\n')) {
-                content = content.slice(1);
-                if (!content.endsWith('\n')) { content += '\n'; }
-            }
+            let content = suggestion.content.replace(/^\n+/, '');
+            if (content && !content.endsWith('\n')) { content += '\n'; }
             const lines = content.split('\n');
             const endLine = editPos.line + lines.length - 1;
             const endCol = lines.length === 1
@@ -210,32 +211,34 @@ export class SuggestionProvider {
         this.client.notify('accept', suggestion.action, suggestion.editLine + 1);
         console.log(`[InlineCode] Accepted: ${suggestion.action} at L${suggestion.editLine + 1}`);
 
-        // Show next queued change immediately
+        // Show next queued change
         if (this.changeQueue.length > 0) {
             const next = this.changeQueue.shift()!;
             console.log(`[InlineCode] Next queued change (${this.changeQueue.length} remaining)`);
-            this.isApplyingEdit = false;
+            this.busy = false;
             await this.showSuggestion(editor, next);
         } else {
-            this.isApplyingEdit = false;
             this.currentSuggestion = null;
             vscode.commands.executeCommand('setContext', 'inlineCode.suggestionVisible', false);
-            // Trigger next prediction after accepting
-            this.schedulePrediction(editor);
+            this.busy = false;
+            // Schedule next prediction after accepting
+            this.schedulePrediction(editor, EDIT_DEBOUNCE_MS);
         }
     }
 
     async dismissSuggestion(editor: vscode.TextEditor): Promise<void> {
-        if (this.currentSuggestion) {
-            this.isShowingPreview = true;
-            await this.renderer.dismissPreview(editor);
-            this.isShowingPreview = false;
-            this.client.notify('dismiss');
-            console.log('[InlineCode] Dismissed (preview reversed)');
-        }
+        if (!this.currentSuggestion) { return; }
+        if (this.busy) { return; }
+        this.busy = true;
+
+        await this.renderer.dismissPreview(editor);
+        this.client.notify('dismiss');
+        console.log('[InlineCode] Dismissed');
+
         this.changeQueue = [];
         this.currentSuggestion = null;
         vscode.commands.executeCommand('setContext', 'inlineCode.suggestionVisible', false);
+        this.busy = false;
     }
 
     private recordChange(suggestion: Suggestion): void {

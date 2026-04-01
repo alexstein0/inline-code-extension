@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import { Suggestion } from './types';
 
-// Inserted text: ghost-text style (dimmed, italic) + green left gutter bar
-const insertedTextDecoration = vscode.window.createTextEditorDecorationType({
+// Ghost-text styling for inserted/new text: dimmed, italic, green gutter bar
+const insertedLineDecoration = vscode.window.createTextEditorDecorationType({
     color: new vscode.ThemeColor('editorGhostText.foreground'),
     fontStyle: 'italic',
     backgroundColor: 'rgba(155, 185, 85, 0.08)',
@@ -12,160 +12,159 @@ const insertedTextDecoration = vscode.window.createTextEditorDecorationType({
     borderColor: 'rgba(155, 185, 85, 0.6)',
 });
 
-// Text that will be deleted: just strikethrough, keep original color
-const pendingDeleteDecoration = vscode.window.createTextEditorDecorationType({
+// Strikethrough for text that will be deleted
+const deletedLineDecoration = vscode.window.createTextEditorDecorationType({
     textDecoration: 'line-through',
     opacity: '0.6',
 });
 
+type PreviewState = 'idle' | 'applying' | 'active' | 'dismissing';
+
 export class DecorationRenderer {
     private activeDecorations: vscode.TextEditorDecorationType[] = [];
-    private previewApplied = false;
-    private reverseEdit: (() => Promise<void>) | null = null;
+    private state: PreviewState = 'idle';
+    private generation = 0;
+    private safetyTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // What was inserted during preview (for reversal)
+    private insertedText: string | null = null;
+    private insertedAt: vscode.Position | null = null;
+
+    // For replace: the old text that was strikethrough'd (to delete on accept)
+    private deleteRange: vscode.Range | null = null;
 
     /**
-     * Apply the edit to the document and highlight the changed region.
-     * Inserted text is styled like ghost text (dimmed + italic + green gutter).
-     * Returns true if the preview was applied successfully.
+     * Show a preview of the suggested edit.
+     *
+     * - Insert: inserts text into document, decorates as ghost text
+     * - Delete: decorates existing text with strikethrough (no doc change)
+     * - Replace: strikethroughs old text, inserts new text below, decorates as ghost
+     *
+     * Returns true if preview is now active.
      */
     async showPreview(editor: vscode.TextEditor, suggestion: Suggestion): Promise<boolean> {
-        this.clear(editor);
+        if (this.state !== 'idle') {
+            return false;
+        }
+
+        this.state = 'applying';
+        const gen = ++this.generation;
+
+        this.clearDecorations(editor);
+        this.insertedText = null;
+        this.insertedAt = null;
+        this.deleteRange = null;
 
         const editPos = new vscode.Position(suggestion.editLine, suggestion.editCol);
+        let success = false;
 
-        switch (suggestion.action) {
-            case 'insert': {
-                let content = suggestion.content;
-                if (!content) { return false; }
-
-                // When content starts with \n, the model means "insert new lines before editLine".
-                // Transform: strip leading \n, ensure trailing \n so existing line gets pushed down.
-                if (content.startsWith('\n')) {
-                    content = content.slice(1);
-                    if (!content.endsWith('\n')) {
-                        content += '\n';
-                    }
-                }
-
-                // Apply the insert
-                const success = await editor.edit((eb) => {
-                    eb.insert(editPos, content);
-                }, { undoStopBefore: true, undoStopAfter: true });
-
-                if (!success) { return false; }
-
-                // Highlight each inserted line with ghost-text styling
-                const insertedRange = this.calculateRange(editPos, content);
-                this.decorateInsertedLines(editor, editPos.line, insertedRange.end.line, content);
-
-                this.previewApplied = true;
-                this.reverseEdit = async () => {
-                    await editor.edit((eb) => {
-                        eb.delete(insertedRange);
-                    }, { undoStopBefore: false, undoStopAfter: false });
-                };
-                return true;
+        try {
+            switch (suggestion.action) {
+                case 'insert':
+                    success = await this.previewInsert(editor, suggestion, editPos);
+                    break;
+                case 'delete':
+                    success = this.previewDelete(editor, suggestion, editPos);
+                    break;
+                case 'replace':
+                    success = await this.previewReplace(editor, suggestion, editPos);
+                    break;
             }
-
-            case 'delete': {
-                // For delete, highlight what will be removed (don't actually delete yet)
-                const content = suggestion.content;
-                if (!content) { return false; }
-
-                const range = this.calculateRange(editPos, content);
-                editor.setDecorations(pendingDeleteDecoration, [{ range }]);
-
-                this.previewApplied = false; // not applied yet — applied on accept
-                this.reverseEdit = null;
-                return true;
-            }
-
-            case 'replace': {
-                const deleteText = suggestion.deleteText;
-                let insertText = suggestion.insertText || '';
-                if (!deleteText) { return false; }
-
-                // Ensure insert text ends with \n for proper line separation
-                if (insertText && !insertText.endsWith('\n')) {
-                    insertText += '\n';
-                }
-
-                // Strikethrough the old text
-                const deleteRange = this.calculateRange(editPos, deleteText);
-                editor.setDecorations(pendingDeleteDecoration, [{ range: deleteRange }]);
-
-                // Insert the new text AFTER the old text (which stays visible with strikethrough)
-                const insertPos = new vscode.Position(deleteRange.end.line + 1, 0);
-                const success = await editor.edit((eb) => {
-                    // Insert at start of the line after the deleted range
-                    if (insertPos.line <= editor.document.lineCount) {
-                        eb.insert(insertPos, insertText);
-                    } else {
-                        // At end of file, insert after last line
-                        const lastLine = editor.document.lineAt(editor.document.lineCount - 1);
-                        eb.insert(lastLine.range.end, '\n' + insertText);
-                    }
-                }, { undoStopBefore: true, undoStopAfter: true });
-
-                if (!success) { return false; }
-
-                // Highlight the new text with ghost-text styling
-                const insertedRange = this.calculateRange(insertPos, insertText);
-                this.decorateInsertedLines(editor, insertPos.line, insertedRange.end.line, insertText);
-
-                this.previewApplied = true;
-                this.reverseEdit = async () => {
-                    // Remove the inserted new text
-                    const newRange = this.calculateRange(insertPos, insertText);
-                    await editor.edit((eb) => {
-                        eb.delete(newRange);
-                    }, { undoStopBefore: false, undoStopAfter: false });
-                };
-                return true;
-            }
+        } catch (e) {
+            console.error('[InlineCode] Preview error:', e);
+            success = false;
         }
-        return false;
+
+        // If generation changed during async operations, someone else took over
+        if (gen !== this.generation) {
+            return false;
+        }
+
+        if (success) {
+            this.state = 'active';
+            // Safety timeout: auto-dismiss after 30 seconds
+            this.safetyTimer = setTimeout(() => {
+                if (this.state === 'active') {
+                    console.log('[InlineCode] Safety timeout — auto-dismissing preview');
+                    this.dismissPreview(editor);
+                }
+            }, 30000);
+        } else {
+            this.state = 'idle';
+        }
+
+        return success;
     }
 
     /**
-     * Accept the preview — just remove decorations (edit is already applied).
-     * For delete action, actually apply the edit now.
+     * Accept the preview — finalize the edit.
+     * For insert: text is already in document, just clear decorations.
+     * For delete: apply the deletion now.
+     * For replace: delete the old strikethrough lines, keep the new inserted lines.
      */
     async acceptPreview(editor: vscode.TextEditor, suggestion: Suggestion): Promise<void> {
-        const editPos = new vscode.Position(suggestion.editLine, suggestion.editCol);
-        if (suggestion.action === 'delete' && suggestion.content) {
-            // Delete wasn't applied during preview — apply now
-            const range = this.calculateRange(editPos, suggestion.content);
-            await editor.edit((eb) => {
-                eb.delete(range);
-            });
-        } else if (suggestion.action === 'replace' && suggestion.deleteText) {
-            // New text is already inserted below. Now delete the old strikethrough lines.
-            const deleteRange = this.calculateRange(editPos, suggestion.deleteText);
-            // Delete old text including its trailing newline
-            const deleteWithNewline = new vscode.Range(
-                deleteRange.start,
-                new vscode.Position(deleteRange.end.line + 1, 0)
-            );
-            await editor.edit((eb) => {
-                eb.delete(deleteWithNewline);
-            });
+        if (this.state !== 'active') { return; }
+        this.state = 'applying';
+        this.clearSafetyTimer();
+
+        try {
+            const editPos = new vscode.Position(suggestion.editLine, suggestion.editCol);
+
+            if (suggestion.action === 'delete' && suggestion.content) {
+                // Delete wasn't applied during preview — apply now
+                const range = this.calculateRange(editPos, suggestion.content);
+                await editor.edit((eb) => {
+                    eb.delete(range);
+                }, { undoStopBefore: true, undoStopAfter: true });
+
+            } else if (suggestion.action === 'replace' && this.deleteRange) {
+                // Delete the old strikethrough lines (new lines are already inserted below)
+                // Include the trailing newline of the last deleted line
+                const fullDeleteRange = new vscode.Range(
+                    this.deleteRange.start,
+                    new vscode.Position(this.deleteRange.end.line + 1, 0)
+                );
+                await editor.edit((eb) => {
+                    eb.delete(fullDeleteRange);
+                }, { undoStopBefore: true, undoStopAfter: true });
+            }
+            // For insert: text is already in the document, nothing to do
+        } catch (e) {
+            console.error('[InlineCode] Accept error:', e);
         }
-        this.clear(editor);
-        this.previewApplied = false;
-        this.reverseEdit = null;
+
+        this.clearDecorations(editor);
+        this.insertedText = null;
+        this.insertedAt = null;
+        this.deleteRange = null;
+        this.state = 'idle';
     }
 
     /**
-     * Dismiss the preview — reverse the edit and remove decorations.
+     * Dismiss the preview — reverse any document changes.
      */
     async dismissPreview(editor: vscode.TextEditor): Promise<void> {
-        if (this.previewApplied && this.reverseEdit) {
-            await this.reverseEdit();
+        if (this.state !== 'active') { return; }
+        this.state = 'dismissing';
+        this.clearSafetyTimer();
+
+        try {
+            // Reverse any inserted text
+            if (this.insertedText && this.insertedAt) {
+                const insertedRange = this.calculateRange(this.insertedAt, this.insertedText);
+                await editor.edit((eb) => {
+                    eb.delete(insertedRange);
+                }, { undoStopBefore: false, undoStopAfter: false });
+            }
+        } catch (e) {
+            console.error('[InlineCode] Dismiss error:', e);
         }
-        this.clear(editor);
-        this.previewApplied = false;
-        this.reverseEdit = null;
+
+        this.clearDecorations(editor);
+        this.insertedText = null;
+        this.insertedAt = null;
+        this.deleteRange = null;
+        this.state = 'idle';
     }
 
     /** Show a jump indicator at the cursor when the edit is far away. */
@@ -193,9 +192,122 @@ export class DecorationRenderer {
         editor.setDecorations(dec, [{ range: new vscode.Range(cursorEnd, cursorEnd) }]);
     }
 
-    clear(editor: vscode.TextEditor): void {
-        editor.setDecorations(insertedTextDecoration, []);
-        editor.setDecorations(pendingDeleteDecoration, []);
+    get isActive(): boolean {
+        return this.state === 'active';
+    }
+
+    get isBusy(): boolean {
+        return this.state === 'applying' || this.state === 'dismissing';
+    }
+
+    // ─── Private: preview implementations ───────────────────────────
+
+    private async previewInsert(
+        editor: vscode.TextEditor, suggestion: Suggestion, editPos: vscode.Position
+    ): Promise<boolean> {
+        let content = suggestion.content;
+        if (!content) { return false; }
+
+        // Normalize: strip leading \n, ensure trailing \n
+        content = content.replace(/^\n+/, '');
+        if (content && !content.endsWith('\n')) {
+            content += '\n';
+        }
+        if (!content) { return false; }
+
+        const success = await editor.edit((eb) => {
+            eb.insert(editPos, content);
+        }, { undoStopBefore: true, undoStopAfter: true });
+
+        if (!success) { return false; }
+
+        this.insertedText = content;
+        this.insertedAt = editPos;
+
+        // Decorate the inserted lines
+        const insertedRange = this.calculateRange(editPos, content);
+        this.decorateLines(editor, editPos.line, insertedRange.end.line, content, insertedLineDecoration);
+
+        return true;
+    }
+
+    private previewDelete(
+        editor: vscode.TextEditor, suggestion: Suggestion, editPos: vscode.Position
+    ): boolean {
+        const content = suggestion.content;
+        if (!content) { return false; }
+
+        const range = this.calculateRange(editPos, content);
+        editor.setDecorations(deletedLineDecoration, [{ range }]);
+
+        // No document modification — deletion happens on accept
+        return true;
+    }
+
+    private async previewReplace(
+        editor: vscode.TextEditor, suggestion: Suggestion, editPos: vscode.Position
+    ): Promise<boolean> {
+        const deleteText = suggestion.deleteText;
+        let insertText = suggestion.insertText || '';
+        if (!deleteText) { return false; }
+
+        // Ensure insert text ends with \n for proper line separation
+        if (insertText && !insertText.endsWith('\n')) {
+            insertText += '\n';
+        }
+
+        // 1. Strikethrough the old text
+        const delRange = this.calculateRange(editPos, deleteText);
+        editor.setDecorations(deletedLineDecoration, [{ range: delRange }]);
+        this.deleteRange = delRange;
+
+        // 2. Insert new text AFTER the old text
+        if (insertText) {
+            const insertPos = new vscode.Position(delRange.end.line + 1, 0);
+            const success = await editor.edit((eb) => {
+                if (insertPos.line <= editor.document.lineCount) {
+                    eb.insert(insertPos, insertText);
+                } else {
+                    const lastLine = editor.document.lineAt(editor.document.lineCount - 1);
+                    eb.insert(lastLine.range.end, '\n' + insertText);
+                }
+            }, { undoStopBefore: true, undoStopAfter: true });
+
+            if (!success) { return false; }
+
+            const actualInsertPos = insertPos.line <= editor.document.lineCount
+                ? insertPos : new vscode.Position(editor.document.lineCount - 1, 0);
+
+            this.insertedText = insertText;
+            this.insertedAt = actualInsertPos;
+
+            // Decorate the new lines
+            const insertedRange = this.calculateRange(actualInsertPos, insertText);
+            this.decorateLines(editor, actualInsertPos.line, insertedRange.end.line, insertText, insertedLineDecoration);
+        }
+
+        return true;
+    }
+
+    // ─── Private: utilities ─────────────────────────────────────────
+
+    private decorateLines(
+        editor: vscode.TextEditor, startLine: number, endLine: number,
+        content: string, decoration: vscode.TextEditorDecorationType
+    ): void {
+        const ranges: vscode.Range[] = [];
+        const lastLine = content.endsWith('\n') ? endLine - 1 : endLine;
+        for (let line = startLine; line <= lastLine && line < editor.document.lineCount; line++) {
+            ranges.push(editor.document.lineAt(line).range);
+        }
+        if (ranges.length > 0) {
+            editor.setDecorations(decoration, ranges);
+        }
+    }
+
+    private clearDecorations(editor: vscode.TextEditor): void {
+        editor.setDecorations(insertedLineDecoration, []);
+        editor.setDecorations(deletedLineDecoration, []);
         for (const dec of this.activeDecorations) {
             editor.setDecorations(dec, []);
             dec.dispose();
@@ -203,24 +315,10 @@ export class DecorationRenderer {
         this.activeDecorations = [];
     }
 
-    get isPreviewApplied(): boolean {
-        return this.previewApplied;
-    }
-
-    /**
-     * Apply ghost-text styling to inserted lines.
-     * Each line gets: dimmed color, italic, green left gutter bar.
-     */
-    private decorateInsertedLines(editor: vscode.TextEditor, startLine: number, endLine: number, content: string): void {
-        const ranges: vscode.Range[] = [];
-        // If content ends with \n, the last "line" in the split is empty — don't decorate it
-        const lastLine = content.endsWith('\n') ? endLine - 1 : endLine;
-        for (let line = startLine; line <= lastLine && line < editor.document.lineCount; line++) {
-            const lineRange = editor.document.lineAt(line).range;
-            ranges.push(lineRange);
-        }
-        if (ranges.length > 0) {
-            editor.setDecorations(insertedTextDecoration, ranges);
+    private clearSafetyTimer(): void {
+        if (this.safetyTimer) {
+            clearTimeout(this.safetyTimer);
+            this.safetyTimer = null;
         }
     }
 
