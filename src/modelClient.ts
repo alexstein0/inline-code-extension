@@ -47,6 +47,11 @@ export class ModelClient {
     }
 
     async notify(event: string, action?: string, line?: number): Promise<void> {
+        if (event === 'accept') {
+            log(`✓ ACCEPTED ${action || ''} at L${line || '?'}`);
+        } else if (event === 'dismiss') {
+            log(`✗ DISMISSED`);
+        }
         try {
             const url = `${this.getServerUrl()}/notify`;
             await fetch(url, {
