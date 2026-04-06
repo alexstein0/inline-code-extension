@@ -110,7 +110,12 @@ export class DecorationRenderer {
         try {
             const editPos = new vscode.Position(suggestion.editLine, suggestion.editCol);
 
-            if (suggestion.action === 'delete' && suggestion.content) {
+            if (suggestion.action === 'insert') {
+                // Insert was already applied during preview without undo stops.
+                // Create an undo stop now so the accepted edit is undoable.
+                await editor.edit(() => {}, { undoStopBefore: true, undoStopAfter: true });
+
+            } else if (suggestion.action === 'delete' && suggestion.content) {
                 // Delete wasn't applied during preview — apply now
                 const range = this.calculateRange(editPos, suggestion.content);
                 await editor.edit((eb) => {
@@ -217,7 +222,7 @@ export class DecorationRenderer {
 
         const success = await editor.edit((eb) => {
             eb.insert(editPos, content);
-        }, { undoStopBefore: true, undoStopAfter: true });
+        }, { undoStopBefore: false, undoStopAfter: false });
 
         if (!success) { return false; }
 
@@ -271,7 +276,7 @@ export class DecorationRenderer {
                     const lastLine = editor.document.lineAt(editor.document.lineCount - 1);
                     eb.insert(lastLine.range.end, '\n' + insertText);
                 }
-            }, { undoStopBefore: true, undoStopAfter: true });
+            }, { undoStopBefore: false, undoStopAfter: false });
 
             if (!success) { return false; }
 

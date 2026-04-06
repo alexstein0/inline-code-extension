@@ -216,8 +216,10 @@ export class SuggestionProvider {
         if (lineShift !== 0) {
             for (const queued of this.changeQueue) {
                 if (queued.editLine >= suggestion.editLine) {
+                    const oldLine = queued.line;
                     queued.editLine += lineShift;
                     queued.line += lineShift;
+                    console.log(`[InlineCode] Adjusted: line ${oldLine} (model) → ${queued.line} (adjusted), shift=${lineShift}`);
                 }
             }
         }
@@ -225,7 +227,7 @@ export class SuggestionProvider {
         // Show next queued change
         if (this.changeQueue.length > 0) {
             const next = this.changeQueue.shift()!;
-            console.log(`[InlineCode] Next queued change (${this.changeQueue.length} remaining), shifted by ${lineShift} lines`);
+            console.log(`[InlineCode] Next queued change (${this.changeQueue.length} remaining)`);
             this.busy = false;
             await this.showSuggestion(editor, next);
         } else {
