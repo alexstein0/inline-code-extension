@@ -141,7 +141,7 @@ export class SuggestionProvider {
         const detail = suggestion.action === 'replace'
             ? `"${(suggestion.deleteText || '').slice(0, 30)}" → "${(suggestion.insertText || '').slice(0, 30)}"`
             : `"${(suggestion.content || '').slice(0, 50)}"`;
-        console.log(`[InlineCode] Showing: ${suggestion.action} at L${suggestion.editLine + 1}:${suggestion.editCol} ${detail}${queueInfo}`);
+        console.log(`[InlineCode] Showing: ${suggestion.action} at L${suggestion.editLine + 1}:${suggestion.editCol} (server-resolved) ${detail}${queueInfo}`);
 
         const applied = await this.renderer.showPreview(editor, suggestion);
 
@@ -211,18 +211,9 @@ export class SuggestionProvider {
         this.client.notify('accept', suggestion.action, suggestion.editLine + 1);
         console.log(`[InlineCode] Accepted: ${suggestion.action} at L${suggestion.editLine + 1}`);
 
-        // Adjust queued changes' line numbers based on what this edit did
-        const lineShift = this.computeLineShift(suggestion);
-        if (lineShift !== 0) {
-            for (const queued of this.changeQueue) {
-                if (queued.editLine >= suggestion.editLine) {
-                    const oldLine = queued.line;
-                    queued.editLine += lineShift;
-                    queued.line += lineShift;
-                    console.log(`[InlineCode] Adjusted: line ${oldLine} (model) → ${queued.line} (adjusted), shift=${lineShift}`);
-                }
-            }
-        }
+        // Note: line numbers are NOT adjusted here — the server already resolves
+        // each step sequentially against the updated file state, so line numbers
+        // are correct for the document state after all prior edits are applied.
 
         // Show next queued change
         if (this.changeQueue.length > 0) {
