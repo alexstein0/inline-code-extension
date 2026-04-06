@@ -211,10 +211,21 @@ export class SuggestionProvider {
         this.client.notify('accept', suggestion.action, suggestion.editLine + 1);
         console.log(`[InlineCode] Accepted: ${suggestion.action} at L${suggestion.editLine + 1}`);
 
+        // Adjust queued changes' line numbers based on what this edit did
+        const lineShift = this.computeLineShift(suggestion);
+        if (lineShift !== 0) {
+            for (const queued of this.changeQueue) {
+                if (queued.editLine >= suggestion.editLine) {
+                    queued.editLine += lineShift;
+                    queued.line += lineShift;
+                }
+            }
+        }
+
         // Show next queued change
         if (this.changeQueue.length > 0) {
             const next = this.changeQueue.shift()!;
-            console.log(`[InlineCode] Next queued change (${this.changeQueue.length} remaining)`);
+            console.log(`[InlineCode] Next queued change (${this.changeQueue.length} remaining), shifted by ${lineShift} lines`);
             this.busy = false;
             await this.showSuggestion(editor, next);
         } else {
@@ -239,6 +250,27 @@ export class SuggestionProvider {
         this.currentSuggestion = null;
         vscode.commands.executeCommand('setContext', 'inlineCode.suggestionVisible', false);
         this.busy = false;
+    }
+
+    /**
+     * Compute how many lines were added/removed by an accepted edit.
+     * Positive = lines added, negative = lines removed.
+     */
+    private computeLineShift(suggestion: Suggestion): number {
+        if (suggestion.action === 'insert' && suggestion.content) {
+            let content = suggestion.content.replace(/^\n+/, '');
+            if (content && !content.endsWith('\n')) { content += '\n'; }
+            // Count newlines = number of lines inserted
+            return (content.match(/\n/g) || []).length;
+        } else if (suggestion.action === 'delete' && suggestion.content) {
+            const deletedLines = (suggestion.content.match(/\n/g) || []).length;
+            return -deletedLines;
+        } else if (suggestion.action === 'replace') {
+            const deletedLines = ((suggestion.deleteText || '').match(/\n/g) || []).length;
+            const insertedLines = ((suggestion.insertText || '').match(/\n/g) || []).length;
+            return insertedLines - deletedLines;
+        }
+        return 0;
     }
 
     private recordChange(suggestion: Suggestion): void {
