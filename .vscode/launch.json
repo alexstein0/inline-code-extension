@@ -7,7 +7,7 @@
             "request": "launch",
             "args": [
                 "--extensionDevelopmentPath=${workspaceFolder}",
-                "--enable-proposed-api=inline-code-research.inline-code"
+                "--new-window"
             ],
             "outFiles": ["${workspaceFolder}/out/**/*.js"],
             "preLaunchTask": "${defaultBuildTask}"
