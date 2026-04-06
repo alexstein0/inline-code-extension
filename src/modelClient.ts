@@ -46,7 +46,10 @@ export class ModelClient {
             const c = result.changes[i];
             log(`  ── Change ${i + 1} ──`);
             log(`  action:    ${c.action}`);
-            log(`  line:      ${c.line} (0-idx: ${c.edit_line})`);
+            const adjusted = c.model_line != null && c.model_line !== c.line
+                ? ` (model: ${c.model_line} → resolved: ${c.line})`
+                : '';
+            log(`  line:      ${c.line}${adjusted}`);
             if (c.content) {
                 log(`  content:`);
                 for (const line of c.content.split('\n')) {

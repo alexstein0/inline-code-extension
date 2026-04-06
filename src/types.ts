@@ -11,6 +11,7 @@ export interface Change {
     insert: string | null;
     edit_line: number;         // 0-indexed, resolved by server
     edit_col: number;          // 0-indexed, resolved by server
+    model_line: number | null; // original line from model output
 }
 
 // Response from the model server — list of validated changes
