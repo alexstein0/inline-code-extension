@@ -62,13 +62,17 @@ async function selectModel() {
         { location: vscode.ProgressLocation.Notification, title: `Loading ${selected.label}...` },
         async () => {
             try {
+                outputChannel.appendLine(`[InlineCode] Switching model to: ${selected.label}...`);
                 const result = await modelClient.switchModel(selected.label);
                 if (result.status === 'ok') {
+                    outputChannel.appendLine(`[InlineCode] Model switched to: ${result.model} (${result.format})`);
                     vscode.window.showInformationMessage(`Switched to ${result.model} (${result.format})`);
                 } else {
+                    outputChannel.appendLine(`[InlineCode] Model switch failed: ${JSON.stringify(result)}`);
                     vscode.window.showErrorMessage(`Failed: ${JSON.stringify(result)}`);
                 }
             } catch (e: any) {
+                outputChannel.appendLine(`[InlineCode] Model switch error: ${e.message}`);
                 vscode.window.showErrorMessage(`Error switching model: ${e.message}`);
             }
             await updateStatusBar();
