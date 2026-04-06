@@ -154,12 +154,10 @@ export class DecorationRenderer {
         this.clearSafetyTimer();
 
         try {
-            // Reverse any inserted text
-            if (this.insertedText && this.insertedAt) {
-                const insertedRange = this.calculateRange(this.insertedAt, this.insertedText);
-                await editor.edit((eb) => {
-                    eb.delete(insertedRange);
-                }, { undoStopBefore: false, undoStopAfter: false });
+            // Use VS Code's built-in undo to cleanly reverse the preview.
+            // This avoids marking the document as dirty.
+            if (this.insertedText) {
+                await vscode.commands.executeCommand('undo');
             }
         } catch (e) {
             console.error('[InlineCode] Dismiss error:', e);
