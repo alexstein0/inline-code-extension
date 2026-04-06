@@ -20,6 +20,7 @@ export class SuggestionProvider {
     private changeHistory: HistoryStep[] = [];
     private lastEditLine: number | null = null;
     private busy = false;  // mutex for accept/dismiss/show operations
+    private lastAccepted: Suggestion | null = null;  // for undo detection
 
     constructor(private context: vscode.ExtensionContext) {
         this.client = new ModelClient();
@@ -44,13 +45,29 @@ export class SuggestionProvider {
             })
         );
 
-        // On text change: dismiss, then schedule with shorter debounce
+        // On text change: detect undo of accepted edit, or dismiss + reschedule
         context.subscriptions.push(
             vscode.workspace.onDidChangeTextDocument((e) => {
                 if (this.busy) { return; }
                 const editor = vscode.window.activeTextEditor;
                 if (!editor || e.document !== editor.document) { return; }
                 if (!this.isSupportedDocument(e.document)) { return; }
+
+                // Check if this looks like an undo of the last accepted edit
+                if (this.lastAccepted && e.reason === vscode.TextDocumentChangeReason.Undo) {
+                    const suggestion = this.lastAccepted;
+                    this.lastAccepted = null;
+                    console.log(`[InlineCode] Undo detected — re-showing suggestion at L${suggestion.editLine + 1}`);
+                    // Move cursor to where the edit was and re-show the preview
+                    const pos = new vscode.Position(suggestion.editLine, suggestion.editCol);
+                    editor.selection = new vscode.Selection(pos, pos);
+                    editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+                    this.showSuggestion(editor, suggestion);
+                    return;
+                }
+
+                // Any other edit clears the undo target
+                this.lastAccepted = null;
 
                 if (this.currentSuggestion) {
                     this.dismissSuggestion(editor);
@@ -208,6 +225,7 @@ export class SuggestionProvider {
         editor.selection = new vscode.Selection(cursorPos, cursorPos);
 
         this.recordChange(suggestion);
+        this.lastAccepted = suggestion;
         this.client.notify('accept', suggestion.action, suggestion.editLine + 1);
         console.log(`[InlineCode] Accepted: ${suggestion.action} at L${suggestion.editLine + 1}`);
 
