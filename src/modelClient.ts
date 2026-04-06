@@ -40,9 +40,32 @@ export class ModelClient {
         }
 
         const data: unknown = await response.json();
-        log(`  ▸ Raw response: ${JSON.stringify(data)}`);
         const result = parseResponse(data);
-        log(`RESPONSE ← ${result.changes.length} change(s)${result.changes.length > 0 ? ': ' + result.changes.map(c => `${c.action} L${c.line}`).join(', ') : ''}`);
+        log(`RESPONSE ← ${result.changes.length} change(s)`);
+        for (let i = 0; i < result.changes.length; i++) {
+            const c = result.changes[i];
+            log(`  ── Change ${i + 1} ──`);
+            log(`  action:    ${c.action}`);
+            log(`  line:      ${c.line} (0-idx: ${c.edit_line})`);
+            if (c.content) {
+                log(`  content:`);
+                for (const line of c.content.split('\n')) {
+                    log(`    ${line}`);
+                }
+            }
+            if (c.delete) {
+                log(`  delete:`);
+                for (const line of c.delete.split('\n')) {
+                    log(`    ${line}`);
+                }
+            }
+            if (c.insert) {
+                log(`  insert:`);
+                for (const line of c.insert.split('\n')) {
+                    log(`    ${line}`);
+                }
+            }
+        }
         return result;
     }
 
