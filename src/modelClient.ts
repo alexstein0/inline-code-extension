@@ -40,6 +40,13 @@ export class ModelClient {
         }
 
         const data: unknown = await response.json();
+        // Log any server warnings
+        const dataObj = data as Record<string, unknown>;
+        if (Array.isArray(dataObj?.warnings)) {
+            for (const w of dataObj.warnings) {
+                log(`  ⚠ ${w}`);
+            }
+        }
         const result = parseResponse(data);
         log(`RESPONSE ← ${result.changes.length} change(s)`);
         for (let i = 0; i < result.changes.length; i++) {
