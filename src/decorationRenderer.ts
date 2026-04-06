@@ -58,6 +58,7 @@ export class DecorationRenderer {
 
     // For replace: the old text that was strikethrough'd (to delete on accept)
     private deleteRange: vscode.Range | null = null;
+    private wasDirtyBeforePreview = false;
 
     /**
      * Show a preview of the suggested edit.
@@ -75,6 +76,7 @@ export class DecorationRenderer {
 
         this.state = 'applying';
         const gen = ++this.generation;
+        this.wasDirtyBeforePreview = editor.document.isDirty;
 
         this.clearDecorations(editor);
         this.insertedText = null;
@@ -221,6 +223,14 @@ export class DecorationRenderer {
         editor.setDecorations(dec, [{ range: new vscode.Range(cursorEnd, cursorEnd) }]);
     }
 
+    resetState(): void {
+        this.clearSafetyTimer();
+        this.insertedText = null;
+        this.insertedAt = null;
+        this.deleteRange = null;
+        this.state = 'idle';
+    }
+
     get isActive(): boolean {
         return this.state === 'active';
     }
@@ -348,7 +358,7 @@ export class DecorationRenderer {
         }
     }
 
-    private clearDecorations(editor: vscode.TextEditor): void {
+    clearDecorations(editor: vscode.TextEditor): void {
         editor.setDecorations(insertedLineDecoration, []);
         editor.setDecorations(deletedLineDecoration, []);
         for (const dec of this.activeDecorations) {

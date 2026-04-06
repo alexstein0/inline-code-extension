@@ -20,7 +20,6 @@ export class SuggestionProvider {
     private changeHistory: HistoryStep[] = [];
     private lastEditLine: number | null = null;
     private busy = false;  // mutex for accept/dismiss/show operations
-    private lastAccepted: Suggestion | null = null;  // for undo detection
 
     constructor(private context: vscode.ExtensionContext) {
         this.client = new ModelClient();
@@ -45,7 +44,7 @@ export class SuggestionProvider {
             })
         );
 
-        // On text change: detect undo of accepted edit, or dismiss + reschedule
+        // On text change: undo/redo dismiss suggestion silently, other edits dismiss + reschedule
         context.subscriptions.push(
             vscode.workspace.onDidChangeTextDocument((e) => {
                 if (this.busy) { return; }
@@ -53,21 +52,21 @@ export class SuggestionProvider {
                 if (!editor || e.document !== editor.document) { return; }
                 if (!this.isSupportedDocument(e.document)) { return; }
 
-                // Check if this looks like an undo of the last accepted edit
-                if (this.lastAccepted && e.reason === vscode.TextDocumentChangeReason.Undo) {
-                    const suggestion = this.lastAccepted;
-                    this.lastAccepted = null;
-                    console.log(`[InlineCode] Undo detected — re-showing suggestion at L${suggestion.editLine + 1}`);
-                    // Move cursor to where the edit was and re-show the preview
-                    const pos = new vscode.Position(suggestion.editLine, suggestion.editCol);
-                    editor.selection = new vscode.Selection(pos, pos);
-                    editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
-                    this.showSuggestion(editor, suggestion);
+                // Undo/redo with active suggestion: the undo already reversed the preview
+                // (since it was inserted without undo stops, it's grouped with the previous edit).
+                // Just clean up suggestion state — don't re-show or trigger new prediction.
+                if (this.currentSuggestion && (
+                    e.reason === vscode.TextDocumentChangeReason.Undo ||
+                    e.reason === vscode.TextDocumentChangeReason.Redo
+                )) {
+                    console.log(`[InlineCode] ${e.reason === vscode.TextDocumentChangeReason.Undo ? 'Undo' : 'Redo'} — dismissing suggestion`);
+                    this.renderer.clearDecorations(editor);
+                    this.renderer.resetState();
+                    this.currentSuggestion = null;
+                    this.changeQueue = [];
+                    vscode.commands.executeCommand('setContext', 'inlineCode.suggestionVisible', false);
                     return;
                 }
-
-                // Any other edit clears the undo target
-                this.lastAccepted = null;
 
                 if (this.currentSuggestion) {
                     this.dismissSuggestion(editor);
@@ -225,7 +224,6 @@ export class SuggestionProvider {
         editor.selection = new vscode.Selection(cursorPos, cursorPos);
 
         this.recordChange(suggestion);
-        this.lastAccepted = suggestion;
         this.client.notify('accept', suggestion.action, suggestion.editLine + 1);
         console.log(`[InlineCode] Accepted: ${suggestion.action} at L${suggestion.editLine + 1}`);
 
