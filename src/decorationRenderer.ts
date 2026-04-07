@@ -247,11 +247,18 @@ export class DecorationRenderer {
         }
         if (!content) { return false; }
 
-        // Match indentation to the line we're inserting before
-        if (getFixIndentation() && editPos.line < editor.document.lineCount) {
-            const targetLine = editor.document.lineAt(editPos.line).text;
-            const targetIndent = targetLine.match(/^(\s*)/)?.[1] || '';
-            content = reindentBlock(content, targetIndent);
+        // Match indentation to the line we're inserting before.
+        // Skip blank lines — they have no indent, so look at the next non-blank line.
+        if (getFixIndentation()) {
+            let probeLine = editPos.line;
+            while (probeLine < editor.document.lineCount && editor.document.lineAt(probeLine).text.trim() === '') {
+                probeLine++;
+            }
+            if (probeLine < editor.document.lineCount) {
+                const targetLine = editor.document.lineAt(probeLine).text;
+                const targetIndent = targetLine.match(/^(\s*)/)?.[1] || '';
+                content = reindentBlock(content, targetIndent);
+            }
         }
 
         const success = await editor.edit((eb) => {
