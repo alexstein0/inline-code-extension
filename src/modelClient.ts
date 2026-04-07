@@ -53,10 +53,16 @@ export class ModelClient {
             const c = result.changes[i];
             log(`  ── Change ${i + 1} ──`);
             log(`  action:    ${c.action}`);
-            const adjusted = c.model_line != null && c.model_line !== c.line
-                ? ` (model: ${c.model_line} → resolved: ${c.line})`
-                : '';
-            log(`  line:      ${c.line}${adjusted}`);
+            // Show: model line → shifted line → resolved line
+            const ml = c.model_line;
+            const ps = c.pre_shift_line;
+            let lineStr = `${c.line}`;
+            if (ml != null && ps != null && (ml !== ps || ps !== c.line)) {
+                lineStr = `${c.line}  (model: ${ml} → shifted: ${ps} → resolved: ${c.line})`;
+            } else if (ml != null && ml !== c.line) {
+                lineStr = `${c.line}  (model: ${ml} → resolved: ${c.line})`;
+            }
+            log(`  line:      ${lineStr}`);
             if (c.content) {
                 log(`  content:`);
                 for (const line of c.content.split('\n')) {

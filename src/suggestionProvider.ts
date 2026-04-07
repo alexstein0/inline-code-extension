@@ -4,7 +4,6 @@ import { DecorationRenderer } from './decorationRenderer';
 import { Suggestion, PredictRequest, HistoryStep, changeToSuggestion } from './types';
 
 const MAX_HISTORY = 5;
-const CURSOR_JUMP_THRESHOLD = 10;
 const EDIT_DEBOUNCE_MS = 1000;      // 1s after typing
 const CURSOR_DEBOUNCE_MS = 2000;    // 2s after cursor-only movement
 
@@ -70,6 +69,11 @@ export class SuggestionProvider {
 
                 if (this.currentSuggestion) {
                     this.dismissSuggestion(editor);
+                } else {
+                    // Manual edit (not from us): record in history
+                    for (const change of e.contentChanges) {
+                        this.recordManualChange(change);
+                    }
                 }
                 if (this.isEnabled()) {
                     this.schedulePrediction(editor, EDIT_DEBOUNCE_MS);
@@ -105,16 +109,10 @@ export class SuggestionProvider {
         const seq = ++this.requestSeq;
         const position = editor.selection.active;
 
-        // Reset history if cursor jumped far
-        const cursorLine1 = position.line + 1;
-        if (this.lastEditLine !== null && Math.abs(cursorLine1 - this.lastEditLine) > CURSOR_JUMP_THRESHOLD) {
-            this.changeHistory = [];
-            this.lastEditLine = null;
-        }
 
         const request: PredictRequest = {
             file_content: editor.document.getText(),
-            cursor_line: cursorLine1,
+            cursor_line: position.line + 1,
             cursor_col: position.character,
             language: editor.document.languageId,
             file_path: editor.document.fileName,
@@ -284,10 +282,6 @@ export class SuggestionProvider {
 
     private recordChange(suggestion: Suggestion): void {
         const editLine = suggestion.editLine + 1;
-
-        if (this.lastEditLine !== null && Math.abs(editLine - this.lastEditLine) > CURSOR_JUMP_THRESHOLD) {
-            this.changeHistory = [];
-        }
         this.lastEditLine = editLine;
 
         const step: HistoryStep = {
@@ -300,10 +294,50 @@ export class SuggestionProvider {
             insert: suggestion.insertText,
         };
 
+        this.pushHistory(step);
+    }
+
+    private pushHistory(step: HistoryStep): void {
         this.changeHistory.push(step);
         if (this.changeHistory.length > MAX_HISTORY) {
             this.changeHistory = this.changeHistory.slice(-MAX_HISTORY);
         }
+    }
+
+    /** Convert a manual document change into a HistoryStep and add it. */
+    private recordManualChange(change: vscode.TextDocumentContentChangeEvent): void {
+        const startLine = change.range.start.line + 1;
+        const insertedText = change.text;
+        const deletedText = change.rangeLength > 0 ? '<deleted>' : '';
+
+        let step: HistoryStep;
+        if (insertedText && !deletedText) {
+            step = {
+                action: 'insert',
+                line: startLine,
+                before: null, after: null,
+                content: insertedText,
+                delete: null, insert: null,
+            };
+        } else if (deletedText && !insertedText) {
+            step = {
+                action: 'delete',
+                line: startLine,
+                before: null, after: null,
+                content: deletedText,
+                delete: null, insert: null,
+            };
+        } else {
+            step = {
+                action: 'replace',
+                line: startLine,
+                before: null, after: null,
+                content: null,
+                delete: deletedText,
+                insert: insertedText,
+            };
+        }
+        this.pushHistory(step);
     }
 
     dispose(): void {

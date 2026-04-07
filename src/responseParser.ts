@@ -19,6 +19,7 @@ function parseChange(obj: Record<string, unknown>): Change | null {
         edit_line: typeof obj.edit_line === 'number' ? obj.edit_line : 0,
         edit_col: typeof obj.edit_col === 'number' ? obj.edit_col : 0,
         model_line: typeof obj.model_line === 'number' ? obj.model_line : null,
+        pre_shift_line: typeof obj.pre_shift_line === 'number' ? obj.pre_shift_line : null,
     };
 }
 

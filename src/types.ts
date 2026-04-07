@@ -11,7 +11,8 @@ export interface Change {
     insert: string | null;
     edit_line: number;         // 0-indexed, resolved by server
     edit_col: number;          // 0-indexed, resolved by server
-    model_line: number | null; // original line from model output
+    model_line: number | null;     // original line from model output
+    pre_shift_line: number | null; // model_line + accumulated shift from prior edits in batch
 }
 
 // Response from the model server — list of validated changes
