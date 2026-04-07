@@ -20,6 +20,7 @@ function parseChange(obj: Record<string, unknown>): Change | null {
         edit_col: typeof obj.edit_col === 'number' ? obj.edit_col : 0,
         model_line: typeof obj.model_line === 'number' ? obj.model_line : null,
         pre_shift_line: typeof obj.pre_shift_line === 'number' ? obj.pre_shift_line : null,
+        end_line: typeof obj.end_line === 'number' ? obj.end_line : null,
     };
 }
 

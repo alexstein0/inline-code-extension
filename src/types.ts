@@ -13,6 +13,7 @@ export interface Change {
     edit_col: number;          // 0-indexed, resolved by server
     model_line: number | null;     // original line from model output
     pre_shift_line: number | null; // model_line + accumulated shift from prior edits in batch
+    end_line: number | null;       // for multi-line replace/delete (line-ln-ba)
 }
 
 // Response from the model server — list of validated changes
