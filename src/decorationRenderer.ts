@@ -110,13 +110,6 @@ export class DecorationRenderer {
 
         if (success) {
             this.state = 'active';
-            // Safety timeout: auto-dismiss after 30 seconds
-            this.safetyTimer = setTimeout(() => {
-                if (this.state === 'active') {
-                    console.log('[InlineCode] Safety timeout — auto-dismissing preview');
-                    this.dismissPreview(editor);
-                }
-            }, 30000);
         } else {
             this.state = 'idle';
         }
