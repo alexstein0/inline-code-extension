@@ -19,6 +19,7 @@ export class SuggestionProvider {
     private changeHistory: HistoryStep[] = [];
     private lastEditLine: number | null = null;
     private busy = false;  // mutex for accept/dismiss/show operations
+    private suppressNextChange = 0;  // ignore N upcoming change events (from our own undo)
 
     constructor(private context: vscode.ExtensionContext) {
         this.client = new ModelClient();
@@ -47,6 +48,10 @@ export class SuggestionProvider {
         context.subscriptions.push(
             vscode.workspace.onDidChangeTextDocument((e) => {
                 if (this.busy) { return; }
+                if (this.suppressNextChange > 0) {
+                    this.suppressNextChange -= 1;
+                    return;
+                }
                 const editor = vscode.window.activeTextEditor;
                 if (!editor || e.document !== editor.document) { return; }
                 if (!this.isSupportedDocument(e.document)) { return; }
@@ -248,6 +253,9 @@ export class SuggestionProvider {
         if (!this.currentSuggestion) { return; }
         if (this.busy) { return; }
         this.busy = true;
+        // The undo fired by dismissPreview will arrive as a TextDocumentChange
+        // event after this method returns — suppress it.
+        this.suppressNextChange += 1;
 
         await this.renderer.dismissPreview(editor);
         this.client.notify('dismiss');
