@@ -53,14 +53,13 @@ export class ModelClient {
             const c = result.changes[i];
             log(`  ── Change ${i + 1} ──`);
             log(`  action:    ${c.action}`);
-            // Show: model line → shifted line → resolved line
+            // Show: model line → shifted line → resolved line whenever any differ
             const ml = c.model_line;
             const ps = c.pre_shift_line;
             let lineStr = `${c.line}`;
-            if (ml != null && ps != null && (ml !== ps || ps !== c.line)) {
-                lineStr = `${c.line}  (model: ${ml} → shifted: ${ps} → resolved: ${c.line})`;
-            } else if (ml != null && ml !== c.line) {
-                lineStr = `${c.line}  (model: ${ml} → resolved: ${c.line})`;
+            if (ml != null && (ml !== c.line || (ps != null && ps !== ml))) {
+                const psStr = ps != null ? ps : ml;
+                lineStr = `${c.line}  (model: ${ml} → shifted: ${psStr} → resolved: ${c.line})`;
             }
             log(`  line:      ${lineStr}`);
             if (c.content) {
