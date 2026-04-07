@@ -76,6 +76,15 @@ export class SuggestionProvider {
 
                 if (this.currentSuggestion) {
                     this.dismissSuggestion(editor);
+                } else if (e.reason === vscode.TextDocumentChangeReason.Undo) {
+                    // Pop the most recent history entry per content change
+                    for (let i = 0; i < e.contentChanges.length; i++) {
+                        if (this.changeHistory.length > 0) {
+                            this.changeHistory.pop();
+                        }
+                    }
+                } else if (e.reason === vscode.TextDocumentChangeReason.Redo) {
+                    // Redo: don't re-add (we don't track popped entries) — just leave history as-is
                 } else {
                     // Manual edit (not from us): record in history
                     for (const change of e.contentChanges) {
