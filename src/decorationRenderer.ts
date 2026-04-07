@@ -1,32 +1,6 @@
 import * as vscode from 'vscode';
 import { Suggestion } from './types';
 
-/**
- * Re-indent a block of text to match a target indentation level.
- * Detects the indent of the first non-empty line in `text`, then shifts
- * all lines by the difference to match `targetIndent`.
- */
-function reindentBlock(text: string, targetIndent: string): string {
-    const lines = text.split('\n');
-    // Find indent of first non-empty line
-    const firstNonEmpty = lines.find(l => l.trim().length > 0);
-    if (!firstNonEmpty) { return text; }
-    const currentIndent = firstNonEmpty.match(/^(\s*)/)?.[1] || '';
-    if (currentIndent === targetIndent) { return text; }
-
-    return lines.map(line => {
-        if (line.trim().length === 0) { return line; } // preserve blank lines
-        if (line.startsWith(currentIndent)) {
-            return targetIndent + line.slice(currentIndent.length);
-        }
-        return line; // line has less indent than base — leave as-is
-    }).join('\n');
-}
-
-function getFixIndentation(): boolean {
-    return vscode.workspace.getConfiguration('inlineCode').get<boolean>('fixIndentation', true);
-}
-
 // Ghost-text styling for inserted/new text: dimmed, italic, green gutter bar
 const insertedLineDecoration = vscode.window.createTextEditorDecorationType({
     color: new vscode.ThemeColor('editorGhostText.foreground'),
@@ -247,19 +221,7 @@ export class DecorationRenderer {
         }
         if (!content) { return false; }
 
-        // Match indentation to the line we're inserting before.
-        // Skip blank lines — they have no indent, so look at the next non-blank line.
-        if (getFixIndentation()) {
-            let probeLine = editPos.line;
-            while (probeLine < editor.document.lineCount && editor.document.lineAt(probeLine).text.trim() === '') {
-                probeLine++;
-            }
-            if (probeLine < editor.document.lineCount) {
-                const targetLine = editor.document.lineAt(probeLine).text;
-                const targetIndent = targetLine.match(/^(\s*)/)?.[1] || '';
-                content = reindentBlock(content, targetIndent);
-            }
-        }
+        // Trust the model's content as-is (server post-processor handles cleanup)
 
         const success = await editor.edit((eb) => {
             eb.insert(editPos, content);
@@ -296,13 +258,6 @@ export class DecorationRenderer {
         const deleteText = suggestion.deleteText;
         let insertText = suggestion.insertText || '';
         if (!deleteText) { return false; }
-
-        // Match insert indentation to delete indentation
-        if (insertText && getFixIndentation()) {
-            const firstDeleteLine = deleteText.split('\n').find(l => l.trim().length > 0);
-            const targetIndent = firstDeleteLine?.match(/^(\s*)/)?.[1] || '';
-            insertText = reindentBlock(insertText, targetIndent);
-        }
 
         // Ensure insert text ends with \n for proper line separation
         if (insertText && !insertText.endsWith('\n')) {
