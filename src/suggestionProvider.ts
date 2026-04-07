@@ -47,11 +47,13 @@ export class SuggestionProvider {
         // On text change: undo/redo dismiss suggestion silently, other edits dismiss + reschedule
         context.subscriptions.push(
             vscode.workspace.onDidChangeTextDocument((e) => {
-                if (this.busy) { return; }
+                // Suppression must run BEFORE busy check, otherwise the busy
+                // path eats the event and the suppression counter never decrements
                 if (this.suppressNextChange > 0) {
                     this.suppressNextChange -= 1;
                     return;
                 }
+                if (this.busy) { return; }
                 const editor = vscode.window.activeTextEditor;
                 if (!editor || e.document !== editor.document) { return; }
                 if (!this.isSupportedDocument(e.document)) { return; }
