@@ -72,6 +72,12 @@ export class ModelClient {
                 lineStr = `${c.line}  (model: ${ml} → shifted: ${psStr} → resolved: ${c.line})`;
             }
             log(`  line:      ${lineStr}`);
+            if (c.before) {
+                log(`  before:    ${c.before.replace(/\n/g, '\\n')}`);
+            }
+            if (c.after) {
+                log(`  after:     ${c.after.replace(/\n/g, '\\n')}`);
+            }
             if (c.content) {
                 log(`  content:`);
                 for (const line of c.content.split('\n')) {
