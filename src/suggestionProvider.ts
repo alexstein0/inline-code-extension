@@ -323,39 +323,24 @@ export class SuggestionProvider {
         }
     }
 
-    /** Convert a manual document change into a HistoryStep and add it. */
+    /** Convert a manual document change into a HistoryStep and add it.
+     *  Only records inserts (we don't have the deleted text for deletions). */
     private recordManualChange(change: vscode.TextDocumentContentChangeEvent): void {
         const startLine = change.range.start.line + 1;
         const insertedText = change.text;
-        const deletedText = change.rangeLength > 0 ? '<deleted>' : '';
+        const wasDeletion = change.rangeLength > 0;
 
-        let step: HistoryStep;
-        if (insertedText && !deletedText) {
-            step = {
-                action: 'insert',
-                line: startLine,
-                before: null, after: null,
-                content: insertedText,
-                delete: null, insert: null,
-            };
-        } else if (deletedText && !insertedText) {
-            step = {
-                action: 'delete',
-                line: startLine,
-                before: null, after: null,
-                content: deletedText,
-                delete: null, insert: null,
-            };
-        } else {
-            step = {
-                action: 'replace',
-                line: startLine,
-                before: null, after: null,
-                content: null,
-                delete: deletedText,
-                insert: insertedText,
-            };
-        }
+        // Skip deletions and replaces — we don't have the deleted text,
+        // and sending a placeholder pollutes the model's context.
+        if (wasDeletion || !insertedText) { return; }
+
+        const step: HistoryStep = {
+            action: 'insert',
+            line: startLine,
+            before: null, after: null,
+            content: insertedText,
+            delete: null, insert: null,
+        };
         this.pushHistory(step);
     }
 
