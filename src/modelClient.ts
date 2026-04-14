@@ -12,6 +12,8 @@ function log(msg: string) {
 }
 
 export class ModelClient {
+    private lastModelInfo: string | null = null;
+
     private getServerUrl(): string {
         return vscode.workspace.getConfiguration('inlineCode').get<string>('serverUrl', 'http://localhost:8321');
     }
@@ -48,8 +50,15 @@ export class ModelClient {
             }
         }
         const result = parseResponse(data);
-        const modelInfo = dataObj?.model ? ` [model: ${dataObj.model}, format: ${dataObj.format}]` : '';
-        log(`RESPONSE ← ${result.changes.length} change(s)${modelInfo}`);
+        // Only log model/format when it changes
+        if (dataObj?.model) {
+            const info = `${dataObj.model} (format: ${dataObj.format})`;
+            if (info !== this.lastModelInfo) {
+                log(`  [model changed] ${info}`);
+                this.lastModelInfo = info;
+            }
+        }
+        log(`RESPONSE ← ${result.changes.length} change(s)`);
         for (let i = 0; i < result.changes.length; i++) {
             const c = result.changes[i];
             log(`  ── Change ${i + 1} ──`);
