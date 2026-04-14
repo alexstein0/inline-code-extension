@@ -48,7 +48,8 @@ export class ModelClient {
             }
         }
         const result = parseResponse(data);
-        log(`RESPONSE ← ${result.changes.length} change(s)`);
+        const modelInfo = dataObj?.model ? ` [model: ${dataObj.model}, format: ${dataObj.format}]` : '';
+        log(`RESPONSE ← ${result.changes.length} change(s)${modelInfo}`);
         for (let i = 0; i < result.changes.length; i++) {
             const c = result.changes[i];
             log(`  ── Change ${i + 1} ──`);
