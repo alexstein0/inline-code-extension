@@ -20,6 +20,7 @@ export class SuggestionProvider {
     private lastEditLine: number | null = null;
     private busy = false;  // mutex for accept/dismiss/show operations
     private suppressNextChange = 0;  // ignore N upcoming change events (from our own undo)
+    private lastRequestKey: string | null = null;  // dedup identical requests
 
     constructor(private context: vscode.ExtensionContext) {
         this.client = new ModelClient();
@@ -27,17 +28,15 @@ export class SuggestionProvider {
 
         vscode.commands.executeCommand('setContext', 'inlineCode.suggestionVisible', false);
 
-        // On cursor movement: dismiss current preview, schedule new prediction
+        // On cursor movement: do NOT dismiss active preview (user just clicking around).
+        // Only schedule a new prediction after the debounce.
         context.subscriptions.push(
             vscode.window.onDidChangeTextEditorSelection((e) => {
                 if (!this.isEnabled() || this.busy) { return; }
                 if (!this.isSupportedDocument(e.textEditor.document)) { return; }
 
-                // Dismiss any active preview
-                if (this.currentSuggestion && this.renderer.isActive) {
-                    this.dismissSuggestion(e.textEditor);
-                    return; // don't immediately re-trigger after dismiss
-                }
+                // Don't auto-dismiss on cursor move — only Esc or a text edit dismisses.
+                if (this.currentSuggestion && this.renderer.isActive) { return; }
 
                 if (this.requestInFlight) { return; }
                 this.schedulePrediction(e.textEditor, CURSOR_DEBOUNCE_MS);
@@ -134,6 +133,19 @@ export class SuggestionProvider {
             file_path: editor.document.fileName,
             history: this.changeHistory,
         };
+
+        // Dedup: if the request is identical to the last one, skip calling the model.
+        const requestKey = JSON.stringify({
+            file: request.file_content,
+            line: request.cursor_line,
+            col: request.cursor_col,
+            history: request.history,
+        });
+        if (requestKey === this.lastRequestKey) {
+            console.log('[InlineCode] Request unchanged — skipping model call');
+            return;
+        }
+        this.lastRequestKey = requestKey;
 
         try {
             this.requestInFlight = true;
