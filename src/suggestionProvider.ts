@@ -336,6 +336,7 @@ export class SuggestionProvider {
     }
 
     /** Convert a manual document change into a HistoryStep and add it.
+     *  Coalesces rapid keystrokes on the same line into a single entry.
      *  Only records inserts (we don't have the deleted text for deletions). */
     private recordManualChange(change: vscode.TextDocumentContentChangeEvent): void {
         const startLine = change.range.start.line + 1;
@@ -345,6 +346,13 @@ export class SuggestionProvider {
         // Skip deletions and replaces — we don't have the deleted text,
         // and sending a placeholder pollutes the model's context.
         if (wasDeletion || !insertedText) { return; }
+
+        // Coalesce: if the last history entry is an insert on the same line, append to it
+        const last = this.changeHistory.length > 0 ? this.changeHistory[this.changeHistory.length - 1] : null;
+        if (last && last.action === 'insert' && last.line === startLine && last.content) {
+            last.content += insertedText;
+            return;
+        }
 
         const step: HistoryStep = {
             action: 'insert',
