@@ -21,6 +21,8 @@ export class SuggestionProvider {
     private busy = false;  // mutex for accept/dismiss/show operations
     private suppressNextChange = 0;  // ignore N upcoming change events (from our own undo)
     private lastRequestKey: string | null = null;  // dedup identical requests
+    private pendingManualInserts: string[] = [];  // accumulates during typing burst
+    private pendingManualLine: number | null = null;  // first line of current burst
 
     constructor(private context: vscode.ExtensionContext) {
         this.client = new ModelClient();
@@ -115,6 +117,9 @@ export class SuggestionProvider {
     }
 
     async triggerPrediction(editor: vscode.TextEditor): Promise<void> {
+        // Finalize any accumulated manual edits into one history entry
+        this.flushPendingManualEdits();
+
         // Abort any in-flight request
         if (this.abortController) {
             this.abortController.abort();
@@ -335,33 +340,39 @@ export class SuggestionProvider {
         }
     }
 
-    /** Convert a manual document change into a HistoryStep and add it.
-     *  Coalesces rapid keystrokes on the same line into a single entry.
-     *  Only records inserts (we don't have the deleted text for deletions). */
+    /** Accumulate a manual document change into the pending burst.
+     *  Only records inserts (we don't have the deleted text for deletions).
+     *  Call flushPendingManualEdits() before sending a prediction to finalize. */
     private recordManualChange(change: vscode.TextDocumentContentChangeEvent): void {
         const startLine = change.range.start.line + 1;
         const insertedText = change.text;
         const wasDeletion = change.rangeLength > 0;
 
-        // Skip deletions and replaces — we don't have the deleted text,
-        // and sending a placeholder pollutes the model's context.
+        // Skip deletions and replaces — we don't have the deleted text.
         if (wasDeletion || !insertedText) { return; }
 
-        // Coalesce: if the last history entry is an insert on the same line, append to it
-        const last = this.changeHistory.length > 0 ? this.changeHistory[this.changeHistory.length - 1] : null;
-        if (last && last.action === 'insert' && last.line === startLine && last.content) {
-            last.content += insertedText;
-            return;
+        if (this.pendingManualLine === null) {
+            this.pendingManualLine = startLine;
         }
+        this.pendingManualInserts.push(insertedText);
+    }
 
-        const step: HistoryStep = {
-            action: 'insert',
-            line: startLine,
-            before: null, after: null,
-            content: insertedText,
-            delete: null, insert: null,
-        };
-        this.pushHistory(step);
+    /** Flush accumulated manual edits into a single history entry. */
+    private flushPendingManualEdits(): void {
+        if (this.pendingManualInserts.length === 0) { return; }
+        const combined = this.pendingManualInserts.join('');
+        if (combined.trim()) {
+            const step: HistoryStep = {
+                action: 'insert',
+                line: this.pendingManualLine ?? 1,
+                before: null, after: null,
+                content: combined,
+                delete: null, insert: null,
+            };
+            this.pushHistory(step);
+        }
+        this.pendingManualInserts = [];
+        this.pendingManualLine = null;
     }
 
     dispose(): void {
