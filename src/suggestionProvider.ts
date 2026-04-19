@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { ModelClient } from './modelClient';
 import { DecorationRenderer } from './decorationRenderer';
-import { Suggestion, PredictRequest, HistoryStep, changeToSuggestion } from './types';
+import { Suggestion, PredictRequest, HistoryStep, editToSuggestion } from './types';
 
 const MAX_HISTORY = 5;
 const EDIT_DEBOUNCE_MS = 1000;      // 1s after typing
@@ -160,13 +160,13 @@ export class SuggestionProvider {
             // Stale response — a newer request was fired
             if (seq !== this.requestSeq) { return; }
 
-            if (response.changes.length === 0) {
-                console.log('[InlineCode] No valid changes from server');
+            if (response.edits.length === 0) {
+                console.log('[InlineCode] No valid edits from server');
                 return;
             }
 
-            const suggestions = response.changes.map(c => changeToSuggestion(c));
-            console.log(`[InlineCode] Received ${suggestions.length} change(s): ${suggestions.map(s => `${s.action}@L${s.editLine + 1}`).join(', ')}`);
+            const suggestions = response.edits.map(e => editToSuggestion(e));
+            console.log(`[InlineCode] Received ${suggestions.length} edit(s): ${suggestions.map(s => `${s.action}@L${s.editLine + 1}`).join(', ')}`);
 
             this.changeQueue = suggestions.slice(1);
             await this.showSuggestion(editor, suggestions[0]);
@@ -323,8 +323,6 @@ export class SuggestionProvider {
         const step: HistoryStep = {
             action: suggestion.action,
             line: editLine,
-            before: suggestion.before,
-            after: suggestion.after,
             content: suggestion.content,
             delete: suggestion.deleteText,
             insert: suggestion.insertText,
@@ -365,7 +363,6 @@ export class SuggestionProvider {
             const step: HistoryStep = {
                 action: 'insert',
                 line: this.pendingManualLine ?? 1,
-                before: null, after: null,
                 content: combined,
                 delete: null, insert: null,
             };

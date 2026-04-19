@@ -1,36 +1,25 @@
 export type ActionType = 'insert' | 'delete' | 'replace';
 
-// A single validated change from the server (edit location already resolved)
-export interface Change {
+// Canonical edit from the server (also used for history — same shape).
+export interface Edit {
     action: ActionType;
-    line: number;              // 1-indexed target line (from model)
-    before: string | null;
-    after: string | null;
-    content: string | null;
-    delete: string | null;
-    insert: string | null;
-    edit_line: number;         // 0-indexed, resolved by server
-    edit_col: number;          // 0-indexed, resolved by server
-    model_line: number | null;     // original line from model output
-    pre_shift_line: number | null; // model_line + accumulated shift from prior edits in batch
-    end_line: number | null;       // for multi-line replace/delete (line-ln-ba)
+    line: number;              // 1-indexed
+    content: string | null;    // for insert/delete
+    delete: string | null;     // for replace
+    insert: string | null;     // for replace
 }
 
-// Response from the model server — list of validated changes
+// Response from the model server
 export interface PredictResponse {
-    changes: Change[];
+    edits: Edit[];
+    warnings: string[];
+    model: string | null;
+    adaptor: string | null;
+    finish_reason: string | null;
 }
 
-// A history step sent to the server (mirrors the output JSON format)
-export interface HistoryStep {
-    action: ActionType;
-    line: number;          // 1-indexed
-    before: string | null;
-    after: string | null;
-    content: string | null;
-    delete: string | null;
-    insert: string | null;
-}
+// History is just a list of canonical edits
+export type HistoryStep = Edit;
 
 // Request to the model server
 export interface PredictRequest {
@@ -42,31 +31,26 @@ export interface PredictRequest {
     history: HistoryStep[];
 }
 
-// Internal suggestion with VS Code coordinates (0-indexed both)
+// Internal suggestion with VS Code coordinates (0-indexed both).
 export interface Suggestion {
     action: ActionType;
-    line: number;          // 1-indexed (from model)
-    before: string | null;
-    after: string | null;
+    line: number;              // 1-indexed (server-resolved)
     content: string | null;
     deleteText: string | null;
     insertText: string | null;
-    editLine: number;      // 0-indexed
-    editCol: number;       // 0-indexed
+    editLine: number;          // 0-indexed
+    editCol: number;           // 0-indexed (always 0 for our full-line edits)
 }
 
-// Convert a server Change to an internal Suggestion.
-// No validation needed — server already validated and resolved edit location.
-export function changeToSuggestion(change: Change): Suggestion {
+// Convert a canonical Edit to an internal Suggestion.
+export function editToSuggestion(edit: Edit): Suggestion {
     return {
-        action: change.action,
-        line: change.line,
-        before: change.before,
-        after: change.after,
-        content: change.content,
-        deleteText: change.delete,
-        insertText: change.insert,
-        editLine: change.edit_line,
-        editCol: change.edit_col,
+        action: edit.action,
+        line: edit.line,
+        content: edit.content,
+        deleteText: edit.delete,
+        insertText: edit.insert,
+        editLine: edit.line - 1,
+        editCol: 0,
     };
 }

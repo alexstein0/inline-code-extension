@@ -42,59 +42,38 @@ export class ModelClient {
         }
 
         const data: unknown = await response.json();
-        // Log any server warnings
-        const dataObj = data as Record<string, unknown>;
-        if (Array.isArray(dataObj?.warnings)) {
-            for (const w of dataObj.warnings) {
-                log(`  ⚠ ${w}`);
-            }
-        }
         const result = parseResponse(data);
-        // Only log model/format when it changes
-        if (dataObj?.model) {
-            const info = `${dataObj.model} (format: ${dataObj.format})`;
+
+        // Log warnings
+        for (const w of result.warnings) { log(`  ⚠ ${w}`); }
+
+        // Only log model/adaptor when it changes
+        if (result.model) {
+            const info = `${result.model} (adaptor: ${result.adaptor})`;
             if (info !== this.lastModelInfo) {
                 log(`  [model changed] ${info}`);
                 this.lastModelInfo = info;
             }
         }
-        log(`RESPONSE ← ${result.changes.length} change(s)`);
-        for (let i = 0; i < result.changes.length; i++) {
-            const c = result.changes[i];
-            log(`  ── Change ${i + 1} ──`);
-            log(`  action:    ${c.action}`);
-            // Show: model line → shifted line → resolved line whenever any differ
-            const ml = c.model_line;
-            const ps = c.pre_shift_line;
-            let lineStr = `${c.line}`;
-            if (ml != null && (ml !== c.line || (ps != null && ps !== ml))) {
-                const psStr = ps != null ? ps : ml;
-                lineStr = `${c.line}  (model: ${ml} → shifted: ${psStr} → resolved: ${c.line})`;
-            }
-            log(`  line:      ${lineStr}`);
-            if (c.before) {
-                log(`  before:    ${c.before.replace(/\n/g, '\\n')}`);
-            }
-            if (c.after) {
-                log(`  after:     ${c.after.replace(/\n/g, '\\n')}`);
-            }
-            if (c.content) {
+
+        const finishSuffix = result.finish_reason === 'length' ? '  (hit token limit)' : '';
+        log(`RESPONSE ← ${result.edits.length} edit(s)${finishSuffix}`);
+        for (let i = 0; i < result.edits.length; i++) {
+            const e = result.edits[i];
+            log(`  ── Edit ${i + 1} ──`);
+            log(`  action:    ${e.action}`);
+            log(`  line:      ${e.line}`);
+            if (e.content) {
                 log(`  content:`);
-                for (const line of c.content.split('\n')) {
-                    log(`    ${line}`);
-                }
+                for (const line of e.content.split('\n')) { log(`    ${line}`); }
             }
-            if (c.delete) {
+            if (e.delete) {
                 log(`  delete:`);
-                for (const line of c.delete.split('\n')) {
-                    log(`    ${line}`);
-                }
+                for (const line of e.delete.split('\n')) { log(`    ${line}`); }
             }
-            if (c.insert) {
+            if (e.insert) {
                 log(`  insert:`);
-                for (const line of c.insert.split('\n')) {
-                    log(`    ${line}`);
-                }
+                for (const line of e.insert.split('\n')) { log(`    ${line}`); }
             }
         }
         return result;

@@ -1,48 +1,40 @@
-import { PredictResponse, Change, ActionType } from './types';
+import { PredictResponse, Edit, ActionType } from './types';
 
 const VALID_ACTIONS: ActionType[] = ['insert', 'delete', 'replace'];
 
-function parseChange(obj: Record<string, unknown>): Change | null {
+function parseEdit(obj: Record<string, unknown>): Edit | null {
     const action = obj.action as string;
     if (!VALID_ACTIONS.includes(action as ActionType)) {
         return null;
     }
-
     return {
         action: action as ActionType,
         line: typeof obj.line === 'number' ? obj.line : 1,
-        before: typeof obj.before === 'string' ? obj.before : null,
-        after: typeof obj.after === 'string' ? obj.after : null,
         content: typeof obj.content === 'string' ? obj.content : null,
         delete: typeof obj.delete === 'string' ? obj.delete : null,
         insert: typeof obj.insert === 'string' ? obj.insert : null,
-        edit_line: typeof obj.edit_line === 'number' ? obj.edit_line : 0,
-        edit_col: typeof obj.edit_col === 'number' ? obj.edit_col : 0,
-        model_line: typeof obj.model_line === 'number' ? obj.model_line : null,
-        pre_shift_line: typeof obj.pre_shift_line === 'number' ? obj.pre_shift_line : null,
-        end_line: typeof obj.end_line === 'number' ? obj.end_line : null,
     };
 }
 
 export function parseResponse(data: unknown): PredictResponse {
-    if (typeof data !== 'object' || data === null) {
-        throw new Error('Response is not an object');
-    }
+    const empty: PredictResponse = { edits: [], warnings: [], model: null, adaptor: null, finish_reason: null };
+    if (typeof data !== 'object' || data === null) { return empty; }
 
     const obj = data as Record<string, unknown>;
-
-    if (Array.isArray(obj.changes)) {
-        const changes: Change[] = [];
-        for (const item of obj.changes) {
+    const edits: Edit[] = [];
+    if (Array.isArray(obj.edits)) {
+        for (const item of obj.edits) {
             if (typeof item === 'object' && item !== null) {
-                const change = parseChange(item as Record<string, unknown>);
-                if (change) {
-                    changes.push(change);
-                }
+                const e = parseEdit(item as Record<string, unknown>);
+                if (e) { edits.push(e); }
             }
         }
-        return { changes };
     }
-
-    return { changes: [] };
+    return {
+        edits,
+        warnings: Array.isArray(obj.warnings) ? (obj.warnings as string[]) : [],
+        model: typeof obj.model === 'string' ? obj.model : null,
+        adaptor: typeof obj.adaptor === 'string' ? obj.adaptor : null,
+        finish_reason: typeof obj.finish_reason === 'string' ? obj.finish_reason : null,
+    };
 }
