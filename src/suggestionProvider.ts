@@ -59,35 +59,41 @@ export class SuggestionProvider {
                 if (!editor || e.document !== editor.document) { return; }
                 if (!this.isSupportedDocument(e.document)) { return; }
 
-                // Undo/redo with active suggestion: the undo already reversed the preview
-                // (since it was inserted without undo stops, it's grouped with the previous edit).
-                // Just clean up suggestion state — don't re-show or trigger new prediction.
-                if (this.currentSuggestion && (
-                    e.reason === vscode.TextDocumentChangeReason.Undo ||
-                    e.reason === vscode.TextDocumentChangeReason.Redo
-                )) {
-                    console.log(`[InlineCode] ${e.reason === vscode.TextDocumentChangeReason.Undo ? 'Undo' : 'Redo'} — dismissing suggestion`);
-                    this.renderer.clearDecorations(editor);
-                    this.renderer.resetState();
-                    this.currentSuggestion = null;
-                    this.changeQueue = [];
-                    vscode.commands.executeCommand('setContext', 'inlineCode.suggestionVisible', false);
+                const isUndo = e.reason === vscode.TextDocumentChangeReason.Undo;
+                const isRedo = e.reason === vscode.TextDocumentChangeReason.Redo;
+
+                // Undo/redo: clean up any active suggestion AND pop history.
+                // Since preview edits have no undo stops, a single Ctrl+Z reverses
+                // both the preview and whatever edit came before it.
+                if (isUndo || isRedo) {
+                    if (this.currentSuggestion) {
+                        console.log(`[InlineCode] ${isUndo ? 'Undo' : 'Redo'} — clearing suggestion`);
+                        this.renderer.clearDecorations(editor);
+                        this.renderer.resetState();
+                        this.currentSuggestion = null;
+                        this.changeQueue = [];
+                        vscode.commands.executeCommand('setContext', 'inlineCode.suggestionVisible', false);
+                    }
+                    if (isUndo) {
+                        // Pop history entries matching the number of content reversals,
+                        // and clear any pending manual edits (same typing burst being undone)
+                        this.pendingManualInserts = [];
+                        this.pendingManualLine = null;
+                        for (let i = 0; i < e.contentChanges.length && this.changeHistory.length > 0; i++) {
+                            this.changeHistory.pop();
+                        }
+                    }
+                    // Fall through: schedule a new prediction for the post-undo state
+                    if (this.isEnabled()) {
+                        this.schedulePrediction(editor, EDIT_DEBOUNCE_MS);
+                    }
                     return;
                 }
 
                 if (this.currentSuggestion) {
                     this.dismissSuggestion(editor);
-                } else if (e.reason === vscode.TextDocumentChangeReason.Undo) {
-                    // Pop the most recent history entry per content change
-                    for (let i = 0; i < e.contentChanges.length; i++) {
-                        if (this.changeHistory.length > 0) {
-                            this.changeHistory.pop();
-                        }
-                    }
-                } else if (e.reason === vscode.TextDocumentChangeReason.Redo) {
-                    // Redo: don't re-add (we don't track popped entries) — just leave history as-is
                 } else {
-                    // Manual edit (not from us): record in history
+                    // Manual edit (not from us): accumulate for history
                     for (const change of e.contentChanges) {
                         this.recordManualChange(change);
                     }
