@@ -22,7 +22,7 @@ export class ModelClient {
         const url = `${this.getServerUrl()}/predict`;
         const body = JSON.stringify(request);
         log(`REQUEST → cursor=${request.cursor_line}:${request.cursor_col} history=${request.history.length} steps, file=${request.file_content.length} chars`);
-        log(`  ▸ Request body: ${body.length > 500 ? body.slice(0, 500) + '...' : body}`);
+        log(`  ▸ Request body (${body.length} chars): ${body}`);
 
         const response = await fetch(url, {
             method: 'POST',
