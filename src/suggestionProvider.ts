@@ -21,14 +21,28 @@ export class SuggestionProvider {
     private busy = false;  // mutex for accept/dismiss/show operations
     private suppressNextChange = 0;  // ignore N upcoming change events (from our own undo)
     private lastRequestKey: string | null = null;  // dedup identical requests
-    private pendingManualInserts: string[] = [];  // accumulates during typing burst
-    private pendingManualLine: number | null = null;  // first line of current burst
+    // Snapshot of the document text taken before the current typing burst started.
+    // Used to compute a line-diff at flush time, capturing the actual change.
+    private burstSnapshot: string | null = null;
 
     constructor(private context: vscode.ExtensionContext) {
         this.client = new ModelClient();
         this.renderer = new DecorationRenderer();
 
         vscode.commands.executeCommand('setContext', 'inlineCode.suggestionVisible', false);
+
+        // Seed burstSnapshot with the active editor's content if any
+        const initialEditor = vscode.window.activeTextEditor;
+        if (initialEditor) {
+            this.burstSnapshot = initialEditor.document.getText();
+        }
+
+        // Re-snapshot when the active editor changes (different file)
+        context.subscriptions.push(
+            vscode.window.onDidChangeActiveTextEditor((ed) => {
+                this.burstSnapshot = ed ? ed.document.getText() : null;
+            })
+        );
 
         // On cursor movement: do NOT dismiss active preview (user just clicking around).
         // Only schedule a new prediction after the debounce.
@@ -75,10 +89,9 @@ export class SuggestionProvider {
                         vscode.commands.executeCommand('setContext', 'inlineCode.suggestionVisible', false);
                     }
                     if (isUndo) {
-                        // Pop history entries matching the number of content reversals,
-                        // and clear any pending manual edits (same typing burst being undone)
-                        this.pendingManualInserts = [];
-                        this.pendingManualLine = null;
+                        // Pop history entries matching the number of content reversals
+                        // and reset the burst snapshot to the current (post-undo) state
+                        this.burstSnapshot = editor.document.getText();
                         for (let i = 0; i < e.contentChanges.length && this.changeHistory.length > 0; i++) {
                             this.changeHistory.pop();
                         }
@@ -124,7 +137,7 @@ export class SuggestionProvider {
 
     async triggerPrediction(editor: vscode.TextEditor): Promise<void> {
         // Finalize any accumulated manual edits into one history entry
-        this.flushPendingManualEdits();
+        this.flushPendingManualEdits(editor);
 
         // Abort any in-flight request
         if (this.abortController) {
@@ -261,6 +274,8 @@ export class SuggestionProvider {
         editor.selection = new vscode.Selection(cursorPos, cursorPos);
 
         this.recordChange(suggestion);
+        // Re-baseline snapshot — accepted text is now part of the file but isn't a "user typing" event
+        this.burstSnapshot = editor.document.getText();
         this.client.notify('accept', suggestion.action, suggestion.editLine + 1);
         console.log(`[InlineCode] Accepted: ${suggestion.action} at L${suggestion.editLine + 1}`);
 
@@ -344,38 +359,81 @@ export class SuggestionProvider {
         }
     }
 
-    /** Accumulate a manual document change into the pending burst.
-     *  Only records inserts (we don't have the deleted text for deletions).
-     *  Call flushPendingManualEdits() before sending a prediction to finalize. */
-    private recordManualChange(change: vscode.TextDocumentContentChangeEvent): void {
-        const startLine = change.range.start.line + 1;
-        const insertedText = change.text;
-        const wasDeletion = change.rangeLength > 0;
-
-        // Skip deletions and replaces — we don't have the deleted text.
-        if (wasDeletion || !insertedText) { return; }
-
-        if (this.pendingManualLine === null) {
-            this.pendingManualLine = startLine;
-        }
-        this.pendingManualInserts.push(insertedText);
+    /** Mark that a manual change occurred. The actual diff is computed at flush time
+     *  by comparing burstSnapshot (taken at end of last flush / activation) to
+     *  the current document text. */
+    private recordManualChange(_change: vscode.TextDocumentContentChangeEvent): void {
+        // No-op per change; flushPendingManualEdits does the heavy lifting via diff.
     }
 
-    /** Flush accumulated manual edits into a single history entry. */
-    private flushPendingManualEdits(): void {
-        if (this.pendingManualInserts.length === 0) { return; }
-        const combined = this.pendingManualInserts.join('');
-        if (combined.trim()) {
-            const step: HistoryStep = {
-                action: 'insert',
-                line: this.pendingManualLine ?? 1,
-                content: combined,
-                delete: null, insert: null,
-            };
+    /** Flush accumulated manual edits into a single history entry by diffing
+     *  burstSnapshot against the current document text. */
+    private flushPendingManualEdits(editor?: vscode.TextEditor): void {
+        const ed = editor ?? vscode.window.activeTextEditor;
+        if (!ed) { return; }
+        const current = ed.document.getText();
+        const before = this.burstSnapshot;
+        // Always update the snapshot, even if no diff to compute.
+        this.burstSnapshot = current;
+        if (before === null || before === current) { return; }
+
+        const step = this.diffToHistoryStep(before, current);
+        if (step) {
             this.pushHistory(step);
         }
-        this.pendingManualInserts = [];
-        this.pendingManualLine = null;
+    }
+
+    /** Compute a single canonical edit (replace) describing the line-level diff
+     *  between before and after document text. Returns null if nothing changed. */
+    private diffToHistoryStep(before: string, after: string): HistoryStep | null {
+        const beforeLines = before.split('\n');
+        const afterLines = after.split('\n');
+
+        // Find first differing line
+        let prefix = 0;
+        const minLen = Math.min(beforeLines.length, afterLines.length);
+        while (prefix < minLen && beforeLines[prefix] === afterLines[prefix]) { prefix++; }
+        if (prefix === beforeLines.length && prefix === afterLines.length) { return null; }
+
+        // Find last differing line (working backwards)
+        let suffix = 0;
+        while (
+            suffix < (beforeLines.length - prefix) &&
+            suffix < (afterLines.length - prefix) &&
+            beforeLines[beforeLines.length - 1 - suffix] === afterLines[afterLines.length - 1 - suffix]
+        ) { suffix++; }
+
+        const deleteLines = beforeLines.slice(prefix, beforeLines.length - suffix);
+        const insertLines = afterLines.slice(prefix, afterLines.length - suffix);
+        const deleteText = deleteLines.join('\n');
+        const insertText = insertLines.join('\n');
+
+        if (deleteText === insertText) { return null; }
+
+        // Decide action based on what's empty
+        if (!deleteText && insertText) {
+            return {
+                action: 'insert',
+                line: prefix + 1,
+                content: insertText,
+                delete: null, insert: null,
+            };
+        }
+        if (deleteText && !insertText) {
+            return {
+                action: 'delete',
+                line: prefix + 1,
+                content: deleteText,
+                delete: null, insert: null,
+            };
+        }
+        return {
+            action: 'replace',
+            line: prefix + 1,
+            content: null,
+            delete: deleteText,
+            insert: insertText,
+        };
     }
 
     dispose(): void {
