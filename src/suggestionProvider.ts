@@ -145,8 +145,16 @@ export class SuggestionProvider {
                 }
 
                 if (this.currentSuggestion) {
-                    // User typed while a suggestion is visible. Try to re-salvage
-                    // against the cached target before falling back to dismiss.
+                    // User typed while a suggestion is visible. Update tracked
+                    // preview ranges to reflect the user's edit, then try to
+                    // re-salvage against the cached target before dismissing.
+                    for (const ch of e.contentChanges) {
+                        this.renderer.updatePreviewRanges({
+                            rangeOffset: ch.rangeOffset,
+                            rangeLength: ch.rangeLength,
+                            text: ch.text,
+                        });
+                    }
                     if (this.cachedTarget !== null) {
                         this.tryReSalvage(editor);
                         return;

@@ -29,6 +29,11 @@ export class DecorationRenderer {
     // What was inserted during preview (for reversal)
     private insertedText: string | null = null;
     private insertedAt: vscode.Position | null = null;
+    // Exact byte ranges of inserted preview text. Used to dismiss without
+    // relying on `executeCommand('undo')` (which would undo the user's
+    // keystroke instead if they typed while preview was visible).
+    // `previewRanges` is updated whenever the document changes — see updatePreviewRanges().
+    private previewRanges: Array<{ start: number; length: number }> = [];
 
     // For replace: the old text that was strikethrough'd (to delete on accept)
     private deleteRange: vscode.Range | null = null;
@@ -150,7 +155,10 @@ export class DecorationRenderer {
     }
 
     /**
-     * Dismiss the preview — reverse any document changes.
+     * Dismiss the preview — explicitly delete the tracked preview ranges.
+     * This is robust against the user typing while the preview is showing
+     * (which would make `executeCommand('undo')` undo the user's keystroke
+     * instead of our preview).
      */
     async dismissPreview(editor: vscode.TextEditor): Promise<void> {
         if (this.state !== 'active') { return; }
@@ -158,10 +166,16 @@ export class DecorationRenderer {
         this.clearSafetyTimer();
 
         try {
-            // Use VS Code's built-in undo to cleanly reverse the preview.
-            // This avoids marking the document as dirty.
-            if (this.insertedText) {
-                await vscode.commands.executeCommand('undo');
+            if (this.previewRanges.length > 0) {
+                // Delete in descending offset order so earlier offsets don't shift
+                const sorted = [...this.previewRanges].sort((a, b) => b.start - a.start);
+                await editor.edit((eb) => {
+                    for (const r of sorted) {
+                        const startPos = editor.document.positionAt(r.start);
+                        const endPos = editor.document.positionAt(r.start + r.length);
+                        eb.delete(new vscode.Range(startPos, endPos));
+                    }
+                }, { undoStopBefore: false, undoStopAfter: false });
             }
         } catch (e) {
             console.error('[InlineCode] Dismiss error:', e);
@@ -171,7 +185,40 @@ export class DecorationRenderer {
         this.insertedText = null;
         this.insertedAt = null;
         this.deleteRange = null;
+        this.previewRanges = [];
         this.state = 'idle';
+    }
+
+    /**
+     * Adjust tracked preview ranges in response to a document change that
+     * occurred OUTSIDE our preview operations (e.g. the user typed). The
+     * change's offset is in the pre-change document; tracked ranges live in
+     * the post-change document.
+     *
+     * Called by SuggestionProvider when a user keystroke arrives while a
+     * preview is active, before tryReSalvage.
+     */
+    updatePreviewRanges(change: { rangeOffset: number; rangeLength: number; text: string }): void {
+        if (this.previewRanges.length === 0) { return; }
+        const editStart = change.rangeOffset;
+        const editEnd = change.rangeOffset + change.rangeLength;
+        const delta = change.text.length - change.rangeLength;
+        this.previewRanges = this.previewRanges.map(r => {
+            if (r.start >= editEnd) {
+                return { start: r.start + delta, length: r.length };
+            } else if (r.start + r.length <= editStart) {
+                return r;  // change after the range, no shift
+            } else {
+                // overlap — user typed into our ghost text; for now, mark as dirty (length 0)
+                // so we can re-render fresh
+                return { start: r.start, length: 0 };
+            }
+        });
+    }
+
+    /** Read-only view of the current preview ranges. */
+    getPreviewRanges(): Array<{ start: number; length: number }> {
+        return [...this.previewRanges];
     }
 
     /** Show a jump indicator at the cursor when the edit is far away. */
@@ -240,6 +287,7 @@ export class DecorationRenderer {
 
         // Decorate inserted regions. Compute adjusted offsets in ascending order.
         const ranges: vscode.Range[] = [];
+        const tracked: Array<{ start: number; length: number }> = [];
         const ascending = [...insertions].sort((a, b) => a.offset - b.offset);
         let runningShift = 0;
         for (const ins of ascending) {
@@ -248,8 +296,10 @@ export class DecorationRenderer {
             const startPos = editor.document.positionAt(startOffset);
             const endPos = editor.document.positionAt(endOffset);
             ranges.push(new vscode.Range(startPos, endPos));
+            tracked.push({ start: startOffset, length: ins.text.length });
             runningShift += ins.text.length;
         }
+        this.previewRanges = tracked;
         // Use a per-range character decoration so we don't span whole lines
         const inlineDec = vscode.window.createTextEditorDecorationType({
             color: new vscode.ThemeColor('editorGhostText.foreground'),
@@ -298,6 +348,9 @@ export class DecorationRenderer {
 
         this.insertedText = content;
         this.insertedAt = actualEditPos;
+        // Track exact range for explicit deletion on dismiss
+        const insertOffset = editor.document.offsetAt(actualEditPos);
+        this.previewRanges = [{ start: insertOffset, length: content.length }];
 
         // Decorate the inserted lines.
         // If we prepended a \n, the visible inserted content starts on the NEXT line.
