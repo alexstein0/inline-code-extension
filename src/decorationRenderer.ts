@@ -278,20 +278,32 @@ export class DecorationRenderer {
         }
         if (!content) { return false; }
 
-        // Trust the model's content as-is (server post-processor handles cleanup)
+        // Handle insert past end-of-document (e.g. "insert at line 2" when doc has 1 line):
+        // append after the last line with a leading newline so a new line is created.
+        let actualEditPos = editPos;
+        let prependedNewline = false;
+        if (editPos.line >= editor.document.lineCount) {
+            const lastLine = editor.document.lineCount - 1;
+            const lastLineEnd = editor.document.lineAt(lastLine).range.end;
+            actualEditPos = lastLineEnd;
+            content = '\n' + content;
+            prependedNewline = true;
+        }
 
         const success = await editor.edit((eb) => {
-            eb.insert(editPos, content);
+            eb.insert(actualEditPos, content);
         }, { undoStopBefore: false, undoStopAfter: false });
 
         if (!success) { return false; }
 
         this.insertedText = content;
-        this.insertedAt = editPos;
+        this.insertedAt = actualEditPos;
 
-        // Decorate the inserted lines
-        const insertedRange = this.calculateRange(editPos, content);
-        this.decorateLines(editor, editPos.line, insertedRange.end.line, content, insertedLineDecoration);
+        // Decorate the inserted lines.
+        // If we prepended a \n, the visible inserted content starts on the NEXT line.
+        const decorateStart = prependedNewline ? actualEditPos.line + 1 : actualEditPos.line;
+        const insertedRange = this.calculateRange(actualEditPos, content);
+        this.decorateLines(editor, decorateStart, insertedRange.end.line, content, insertedLineDecoration);
 
         return true;
     }
