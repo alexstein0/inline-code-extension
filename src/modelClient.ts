@@ -21,8 +21,17 @@ export class ModelClient {
     async predict(request: PredictRequest, signal?: AbortSignal): Promise<PredictResponse> {
         const url = `${this.getServerUrl()}/predict`;
         const body = JSON.stringify(request);
-        log(`REQUEST → cursor=${request.cursor_line}:${request.cursor_col} history=${request.history.length} steps, file=${request.file_content.length} chars`);
-        log(`  ▸ Request body (${body.length} chars): ${body}`);
+        log(`REQUEST → cursor=${request.cursor_line}:${request.cursor_col}  history=${request.history.length} step(s)  file=${request.file_content.length} chars  (diagnostics added server-side if applicable)`);
+        if (request.history.length > 0) {
+            log(`  ▸ History:`);
+            for (let i = 0; i < request.history.length; i++) {
+                const h = request.history[i];
+                const detail = h.action === 'replace'
+                    ? `delete=${JSON.stringify(h.delete)}  insert=${JSON.stringify(h.insert)}`
+                    : `content=${JSON.stringify(h.content)}`;
+                log(`    [${i}] ${h.action} L${h.line}  ${detail}`);
+            }
+        }
 
         const response = await fetch(url, {
             method: 'POST',
