@@ -7,6 +7,43 @@ const MAX_HISTORY = 5;
 const EDIT_DEBOUNCE_MS = 1000;      // 1s after typing
 const CURSOR_DEBOUNCE_MS = 2000;    // 2s after cursor-only movement
 
+/**
+ * Compute insertions to transform `current` → `target`. Returns null if
+ * `current` is not a subsequence of `target` (i.e., the user typed something
+ * that would need to be DELETED to reach target — divergence).
+ *
+ * Greedy linear scan: for each character of target, either match the next
+ * character of current or accumulate as a pending insertion.
+ */
+function computeInsertions(current: string, target: string): Array<{ offset: number; text: string }> | null {
+    const insertions: Array<{ offset: number; text: string }> = [];
+    let i = 0;  // pointer into target
+    let j = 0;  // pointer into current
+    let pendingText = '';
+    let pendingOffset = 0;
+    while (i < target.length || j < current.length) {
+        if (i < target.length && j < current.length && target[i] === current[j]) {
+            if (pendingText) {
+                insertions.push({ offset: pendingOffset, text: pendingText });
+                pendingText = '';
+            }
+            i++; j++;
+        } else if (i < target.length) {
+            // Need to insert target[i] before current[j] (or at end)
+            if (!pendingText) { pendingOffset = j; }
+            pendingText += target[i];
+            i++;
+        } else {
+            // current has unconsumed chars not in target → user diverged
+            return null;
+        }
+    }
+    if (pendingText) {
+        insertions.push({ offset: pendingOffset, text: pendingText });
+    }
+    return insertions;
+}
+
 export class SuggestionProvider {
     private client: ModelClient;
     private renderer: DecorationRenderer;
@@ -21,6 +58,10 @@ export class SuggestionProvider {
     private busy = false;  // mutex for accept/dismiss/show operations
     private suppressNextChange = 0;  // ignore N upcoming change events (from our own undo)
     private lastRequestKey: string | null = null;  // dedup identical requests
+    // Cached target state from current/recent suggestion — used when the user
+    // keeps typing and we want to re-evaluate against the same target without
+    // a new model round-trip.
+    private cachedTarget: string | null = null;
     // Snapshot of the document text taken before the current typing burst started.
     // Used to compute a line-diff at flush time, capturing the actual change.
     private burstSnapshot: string | null = null;
@@ -104,6 +145,12 @@ export class SuggestionProvider {
                 }
 
                 if (this.currentSuggestion) {
+                    // User typed while a suggestion is visible. Try to re-salvage
+                    // against the cached target before falling back to dismiss.
+                    if (this.cachedTarget !== null) {
+                        this.tryReSalvage(editor);
+                        return;
+                    }
                     this.dismissSuggestion(editor);
                 } else {
                     // Manual edit (not from us): accumulate for history
@@ -196,11 +243,20 @@ export class SuggestionProvider {
             const currentSnapshot = editor.document.getText();
             let suggestions = response.edits.map(e => editToSuggestion(e));
 
+            // Compute cumulative target for caching (used by continuous-typing tracking)
+            let cumulativeTarget: string | null = sentSnapshot;
+            for (const sug of suggestions) {
+                if (cumulativeTarget === null) { break; }
+                cumulativeTarget = this.applySuggestion(cumulativeTarget, sug);
+            }
+            this.cachedTarget = cumulativeTarget;
+
             if (sentSnapshot !== currentSnapshot) {
                 console.log(`[InlineCode] User typed while waiting (snapshot changed). Trying to salvage…`);
                 suggestions = this.salvageAgainstUserTyping(suggestions, sentSnapshot, currentSnapshot, editor);
                 if (suggestions.length === 0) {
                     console.log('[InlineCode] Could not salvage — rejecting batch and rescheduling');
+                    this.cachedTarget = null;
                     if (this.isEnabled()) {
                         this.schedulePrediction(editor, 1000);
                     }
@@ -342,45 +398,53 @@ export class SuggestionProvider {
 
     /**
      * Try to adapt suggestions against a user typing burst that happened while
-     * the model was thinking. Returns possibly-trimmed suggestions, or [] if
-     * the user's changes diverge from what the model proposed.
+     * the model was thinking.
      *
-     * Strategy: for each edit, simulate applying it to the SENT snapshot to get
-     * the "target" state. If the CURRENT snapshot is on the path from sent to
-     * target (i.e., user's typing matches what the model would produce up to
-     * some point), trim the edit so it produces only the residual.
+     * Strategy: compute the cumulative `target` state by applying ALL edits to
+     * the sent snapshot, then compute insertions to turn `current` → `target`.
+     * If `current` is a subsequence of `target` (only insertions needed, no
+     * deletions), we have a salvageable diff. Render as multi-position inline
+     * ghost text. Otherwise reject.
      */
     private salvageAgainstUserTyping(
         suggestions: Suggestion[],
         sent: string,
         current: string,
-        editor: vscode.TextEditor,
+        _editor: vscode.TextEditor,
     ): Suggestion[] {
-        const out: Suggestion[] = [];
-        let working = sent;
+        // Build cumulative target by applying every edit in order to sent
+        let target = sent;
         for (const sug of suggestions) {
-            const target = this.applySuggestion(working, sug);
-            if (target === null) { return []; }
-
-            if (current === working) {
-                // No user change relative to "working" baseline → keep edit as-is
-                out.push(sug);
-                working = target;
-                continue;
-            }
-            if (current === target) {
-                // User already typed exactly what this edit would produce → drop it
-                working = target;
-                continue;
-            }
-
-            // Salvage: is `current` a "midway" state between working and target?
-            const adapted = this.adaptEditToCurrent(sug, working, current, target, editor);
-            if (!adapted) { return []; }
-            out.push(adapted);
-            working = target;  // assume future edits are still anchored to original→target chain
+            const next = this.applySuggestion(target, sug);
+            if (next === null) { return []; }
+            target = next;
         }
-        return out;
+        if (current === target) {
+            console.log('[InlineCode] User already typed the entire suggestion — dropping');
+            return [];
+        }
+
+        const insertions = computeInsertions(current, target);
+        if (insertions === null) {
+            console.log('[InlineCode] User diverged from suggestion (deletions required) — rejecting');
+            return [];
+        }
+        if (insertions.length === 0) {
+            return [];
+        }
+        console.log(`[InlineCode] Salvaged as ${insertions.length} inline insertion(s)`);
+        // Wrap as a single Suggestion that carries the multi-insertion payload
+        const totalChars = insertions.reduce((s, i) => s + i.text.length, 0);
+        return [{
+            action: 'insert',
+            line: 1,  // not meaningful for multi-insert but required by type
+            content: null,
+            deleteText: null,
+            insertText: null,
+            editLine: 0,
+            editCol: 0,
+            inlineInsertions: insertions,
+        } as Suggestion & { inlineInsertions: Array<{ offset: number; text: string }> }];
     }
 
     /** Apply a single Suggestion to the given file content; returns null on failure. */
@@ -407,60 +471,56 @@ export class SuggestionProvider {
     }
 
     /**
-     * Try to adapt an edit so that applying it to `current` produces `target`.
-     * Conservative: only handles the "user typed a prefix of an insert" case —
-     * find the differing region between `current` and `target`, and emit an
-     * insert of just the remaining text at the user's cursor.
+     * User typed while a suggestion is showing. The doc currently reflects
+     * (their_typed_state + our_inserted_ghost_text). To recompute the diff
+     * against the cached target, we first need to remove our ghost text.
+     *
+     * Approach: call the renderer's dismiss (which undoes our inserts), then
+     * compute insertions(current_after_undo, cachedTarget). If still salvageable,
+     * show new ghost text. If not, dismiss for real and reschedule.
      */
-    private adaptEditToCurrent(
-        original: Suggestion,
-        _working: string,
-        current: string,
-        target: string,
-        editor: vscode.TextEditor,
-    ): Suggestion | null {
-        // Find common prefix and suffix character-wise between current and target
-        let pre = 0;
-        const minLen = Math.min(current.length, target.length);
-        while (pre < minLen && current[pre] === target[pre]) { pre++; }
-        let suf = 0;
-        while (
-            suf < (current.length - pre) &&
-            suf < (target.length - pre) &&
-            current[current.length - 1 - suf] === target[target.length - 1 - suf]
-        ) { suf++; }
+    private async tryReSalvage(editor: vscode.TextEditor): Promise<void> {
+        if (!this.cachedTarget) { return; }
+        if (this.busy) { return; }
+        this.busy = true;
+        // Dismiss undoes our preview insertions; we need to suppress the resulting
+        // change event so it doesn't recurse.
+        this.suppressNextChange += 1;
+        await this.renderer.dismissPreview(editor);
+        this.currentSuggestion = null;
+        vscode.commands.executeCommand('setContext', 'inlineCode.suggestionVisible', false);
 
-        const userTypedRegion = current.slice(pre, current.length - suf);
-        const targetRegion = target.slice(pre, target.length - suf);
+        const target = this.cachedTarget;
+        const current = editor.document.getText();
 
-        // For salvage to work, the user's region must be EMPTY (they only typed the prefix
-        // of what was to be inserted) and the target has stuff to add.
-        if (userTypedRegion.length !== 0) { return null; }
-        if (targetRegion.length === 0) { return null; }
+        if (current === target) {
+            // User typed everything already
+            console.log('[InlineCode] User completed the suggestion via typing');
+            this.cachedTarget = null;
+            this.busy = false;
+            return;
+        }
 
-        // The user is at offset `pre` in `current`. Map to line/col.
-        const cursorOffset = pre;
-        const before = current.slice(0, cursorOffset);
-        const lineNum = (before.match(/\n/g) ?? []).length + 1;
+        const insertions = computeInsertions(current, target);
+        if (insertions === null || insertions.length === 0) {
+            console.log('[InlineCode] User diverged from target — fresh request');
+            this.cachedTarget = null;
+            this.busy = false;
+            if (this.isEnabled()) {
+                this.schedulePrediction(editor, EDIT_DEBOUNCE_MS);
+            }
+            return;
+        }
 
-        // Emit an insert suggestion at the user's cursor with the residual text
-        const residual = targetRegion;
-        const insertEditLine = lineNum - 1;  // 0-indexed
-        // Use the user's actual cursor column for editCol so the renderer inserts inline
-        const lastNl = before.lastIndexOf('\n');
-        const col = lastNl < 0 ? before.length : before.length - lastNl - 1;
-
-        console.log(`[InlineCode] Salvaged ${original.action}@L${original.line} as inline insert @L${lineNum}:${col} content=${JSON.stringify(residual.slice(0, 60))}`);
-
-        return {
-            action: 'insert',
-            line: lineNum,
-            content: residual,
-            deleteText: null,
-            insertText: null,
-            editLine: insertEditLine,
-            editCol: col,
+        const newSug: Suggestion = {
+            action: 'insert', line: 1,
+            content: null, deleteText: null, insertText: null,
+            editLine: 0, editCol: 0,
+            inlineInsertions: insertions,
         };
+        this.busy = false;
+        await this.showSuggestion(editor, newSug);
+        console.log(`[InlineCode] Re-salvaged: ${insertions.length} inline insertion(s) remaining`);
     }
 
     /**

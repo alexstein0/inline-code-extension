@@ -61,16 +61,21 @@ export class DecorationRenderer {
         let success = false;
 
         try {
-            switch (suggestion.action) {
-                case 'insert':
-                    success = await this.previewInsert(editor, suggestion, editPos);
-                    break;
-                case 'delete':
-                    success = this.previewDelete(editor, suggestion, editPos);
-                    break;
-                case 'replace':
-                    success = await this.previewReplace(editor, suggestion, editPos);
-                    break;
+            // Phase 2 salvage: multi-position inline insertions take priority
+            if (suggestion.inlineInsertions && suggestion.inlineInsertions.length > 0) {
+                success = await this.previewMultiInsert(editor, suggestion.inlineInsertions);
+            } else {
+                switch (suggestion.action) {
+                    case 'insert':
+                        success = await this.previewInsert(editor, suggestion, editPos);
+                        break;
+                    case 'delete':
+                        success = this.previewDelete(editor, suggestion, editPos);
+                        break;
+                    case 'replace':
+                        success = await this.previewReplace(editor, suggestion, editPos);
+                        break;
+                }
             }
         } catch (e) {
             console.error('[InlineCode] Preview error:', e);
@@ -105,7 +110,11 @@ export class DecorationRenderer {
         try {
             const editPos = new vscode.Position(suggestion.editLine, suggestion.editCol);
 
-            if (suggestion.action === 'insert') {
+            if (suggestion.inlineInsertions && suggestion.inlineInsertions.length > 0) {
+                // Multi-insert preview already wrote the text. Just commit an undo stop.
+                await editor.edit(() => {}, { undoStopBefore: true, undoStopAfter: true });
+
+            } else if (suggestion.action === 'insert') {
                 // Insert was already applied during preview without undo stops.
                 // Create an undo stop now so the accepted edit is undoable.
                 await editor.edit(() => {}, { undoStopBefore: true, undoStopAfter: true });
@@ -207,6 +216,54 @@ export class DecorationRenderer {
     }
 
     // ─── Private: preview implementations ───────────────────────────
+
+    /**
+     * Multi-position inline ghost text. Used by speculative-salvage when the user's
+     * typing has produced a state that is a *subsequence* of the model's target —
+     * we just need to inject the missing characters at multiple offsets.
+     */
+    private async previewMultiInsert(
+        editor: vscode.TextEditor,
+        insertions: Array<{ offset: number; text: string }>,
+    ): Promise<boolean> {
+        if (insertions.length === 0) { return false; }
+        // Apply in descending offset order so earlier offsets aren't shifted by later inserts
+        const sorted = [...insertions].sort((a, b) => b.offset - a.offset);
+        const success = await editor.edit((eb) => {
+            for (const ins of sorted) {
+                const pos = editor.document.positionAt(ins.offset);
+                eb.insert(pos, ins.text);
+            }
+        }, { undoStopBefore: false, undoStopAfter: false });
+
+        if (!success) { return false; }
+
+        // Decorate inserted regions. Compute adjusted offsets in ascending order.
+        const ranges: vscode.Range[] = [];
+        const ascending = [...insertions].sort((a, b) => a.offset - b.offset);
+        let runningShift = 0;
+        for (const ins of ascending) {
+            const startOffset = ins.offset + runningShift;
+            const endOffset = startOffset + ins.text.length;
+            const startPos = editor.document.positionAt(startOffset);
+            const endPos = editor.document.positionAt(endOffset);
+            ranges.push(new vscode.Range(startPos, endPos));
+            runningShift += ins.text.length;
+        }
+        // Use a per-range character decoration so we don't span whole lines
+        const inlineDec = vscode.window.createTextEditorDecorationType({
+            color: new vscode.ThemeColor('editorGhostText.foreground'),
+            backgroundColor: 'rgba(155, 185, 85, 0.15)',
+            fontStyle: 'italic',
+        });
+        this.activeDecorations.push(inlineDec);
+        editor.setDecorations(inlineDec, ranges);
+        // Track: from acceptance perspective, no further work needed. Set a flag.
+        this.insertedText = '__MULTI__';
+        this.insertedAt = null;
+        return true;
+    }
+
 
     private async previewInsert(
         editor: vscode.TextEditor, suggestion: Suggestion, editPos: vscode.Position

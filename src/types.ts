@@ -40,6 +40,9 @@ export interface Suggestion {
     insertText: string | null;
     editLine: number;          // 0-indexed
     editCol: number;           // 0-indexed (always 0 for our full-line edits)
+    // Phase 2 salvage: a set of inline insertions to perform anywhere in the doc.
+    // If present, the renderer applies these instead of the single insert/replace.
+    inlineInsertions?: Array<{ offset: number; text: string }>;
 }
 
 // Convert a canonical Edit to an internal Suggestion.
