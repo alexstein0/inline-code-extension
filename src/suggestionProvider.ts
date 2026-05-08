@@ -139,10 +139,10 @@ export class SuggestionProvider {
         // Finalize any accumulated manual edits into one history entry
         this.flushPendingManualEdits(editor);
 
-        // Abort any in-flight request
-        if (this.abortController) {
-            this.abortController.abort();
-        }
+        // NOTE: we used to abort any in-flight request here, but that prevents
+        // the speculative-salvage path. We let in-flight requests complete; the
+        // requestSeq check filters stale results, and salvage tries to adapt
+        // a "snapshot-stale" response to the current document.
         this.abortController = new AbortController();
 
         const seq = ++this.requestSeq;
@@ -171,20 +171,44 @@ export class SuggestionProvider {
         }
         this.lastRequestKey = requestKey;
 
+        // Snapshot what we're sending. If the user types while the model is
+        // thinking, we'll try to salvage the suggestion against the new state.
+        const sentSnapshot = request.file_content;
+
         try {
             this.requestInFlight = true;
             const response = await this.client.predict(request, this.abortController.signal);
             this.requestInFlight = false;
 
-            // Stale response — a newer request was fired
-            if (seq !== this.requestSeq) { return; }
-
-            if (response.edits.length === 0) {
-                console.log('[InlineCode] No valid edits from server');
+            // If something else is already showing, skip this response.
+            // (We allow seq-stale responses through if nothing's shown yet — the
+            // salvage path can still adapt them to the current doc state.)
+            if (this.currentSuggestion || this.busy) {
                 return;
             }
 
-            const suggestions = response.edits.map(e => editToSuggestion(e));
+            if (response.edits.length === 0) {
+                console.log(`[InlineCode] No valid edits from server (seq=${seq})`);
+                return;
+            }
+
+            // Compare snapshot to current document — did the user type while we waited?
+            const currentSnapshot = editor.document.getText();
+            let suggestions = response.edits.map(e => editToSuggestion(e));
+
+            if (sentSnapshot !== currentSnapshot) {
+                console.log(`[InlineCode] User typed while waiting (snapshot changed). Trying to salvage…`);
+                suggestions = this.salvageAgainstUserTyping(suggestions, sentSnapshot, currentSnapshot, editor);
+                if (suggestions.length === 0) {
+                    console.log('[InlineCode] Could not salvage — rejecting batch and rescheduling');
+                    if (this.isEnabled()) {
+                        this.schedulePrediction(editor, 1000);
+                    }
+                    return;
+                }
+                console.log(`[InlineCode] Salvaged ${suggestions.length} edit(s)`);
+            }
+
             console.log(`[InlineCode] Received ${suggestions.length} edit(s): ${suggestions.map(s => `${s.action}@L${s.editLine + 1}`).join(', ')}`);
 
             this.changeQueue = suggestions.slice(1);
@@ -314,6 +338,129 @@ export class SuggestionProvider {
         this.currentSuggestion = null;
         vscode.commands.executeCommand('setContext', 'inlineCode.suggestionVisible', false);
         this.busy = false;
+    }
+
+    /**
+     * Try to adapt suggestions against a user typing burst that happened while
+     * the model was thinking. Returns possibly-trimmed suggestions, or [] if
+     * the user's changes diverge from what the model proposed.
+     *
+     * Strategy: for each edit, simulate applying it to the SENT snapshot to get
+     * the "target" state. If the CURRENT snapshot is on the path from sent to
+     * target (i.e., user's typing matches what the model would produce up to
+     * some point), trim the edit so it produces only the residual.
+     */
+    private salvageAgainstUserTyping(
+        suggestions: Suggestion[],
+        sent: string,
+        current: string,
+        editor: vscode.TextEditor,
+    ): Suggestion[] {
+        const out: Suggestion[] = [];
+        let working = sent;
+        for (const sug of suggestions) {
+            const target = this.applySuggestion(working, sug);
+            if (target === null) { return []; }
+
+            if (current === working) {
+                // No user change relative to "working" baseline → keep edit as-is
+                out.push(sug);
+                working = target;
+                continue;
+            }
+            if (current === target) {
+                // User already typed exactly what this edit would produce → drop it
+                working = target;
+                continue;
+            }
+
+            // Salvage: is `current` a "midway" state between working and target?
+            const adapted = this.adaptEditToCurrent(sug, working, current, target, editor);
+            if (!adapted) { return []; }
+            out.push(adapted);
+            working = target;  // assume future edits are still anchored to original→target chain
+        }
+        return out;
+    }
+
+    /** Apply a single Suggestion to the given file content; returns null on failure. */
+    private applySuggestion(content: string, sug: Suggestion): string | null {
+        const lines = content.split('\n');
+        const lineIdx = sug.line - 1;
+        if (lineIdx < 0 || lineIdx > lines.length) { return null; }
+        if (sug.action === 'insert') {
+            const insertLines = (sug.content ?? '').replace(/\n$/, '').split('\n');
+            return [...lines.slice(0, lineIdx), ...insertLines, ...lines.slice(lineIdx)].join('\n');
+        }
+        if (sug.action === 'delete') {
+            const delLines = (sug.content ?? '').replace(/\n$/, '').split('\n');
+            const n = delLines.length;
+            return [...lines.slice(0, lineIdx), ...lines.slice(lineIdx + n)].join('\n');
+        }
+        if (sug.action === 'replace') {
+            const delLines = (sug.deleteText ?? '').replace(/\n$/, '').split('\n');
+            const insLines = (sug.insertText ?? '').replace(/\n$/, '').split('\n');
+            const n = delLines.length;
+            return [...lines.slice(0, lineIdx), ...insLines, ...lines.slice(lineIdx + n)].join('\n');
+        }
+        return null;
+    }
+
+    /**
+     * Try to adapt an edit so that applying it to `current` produces `target`.
+     * Conservative: only handles the "user typed a prefix of an insert" case —
+     * find the differing region between `current` and `target`, and emit an
+     * insert of just the remaining text at the user's cursor.
+     */
+    private adaptEditToCurrent(
+        original: Suggestion,
+        _working: string,
+        current: string,
+        target: string,
+        editor: vscode.TextEditor,
+    ): Suggestion | null {
+        // Find common prefix and suffix character-wise between current and target
+        let pre = 0;
+        const minLen = Math.min(current.length, target.length);
+        while (pre < minLen && current[pre] === target[pre]) { pre++; }
+        let suf = 0;
+        while (
+            suf < (current.length - pre) &&
+            suf < (target.length - pre) &&
+            current[current.length - 1 - suf] === target[target.length - 1 - suf]
+        ) { suf++; }
+
+        const userTypedRegion = current.slice(pre, current.length - suf);
+        const targetRegion = target.slice(pre, target.length - suf);
+
+        // For salvage to work, the user's region must be EMPTY (they only typed the prefix
+        // of what was to be inserted) and the target has stuff to add.
+        if (userTypedRegion.length !== 0) { return null; }
+        if (targetRegion.length === 0) { return null; }
+
+        // The user is at offset `pre` in `current`. Map to line/col.
+        const cursorOffset = pre;
+        const before = current.slice(0, cursorOffset);
+        const lineNum = (before.match(/\n/g) ?? []).length + 1;
+
+        // Emit an insert suggestion at the user's cursor with the residual text
+        const residual = targetRegion;
+        const insertEditLine = lineNum - 1;  // 0-indexed
+        // Use the user's actual cursor column for editCol so the renderer inserts inline
+        const lastNl = before.lastIndexOf('\n');
+        const col = lastNl < 0 ? before.length : before.length - lastNl - 1;
+
+        console.log(`[InlineCode] Salvaged ${original.action}@L${original.line} as inline insert @L${lineNum}:${col} content=${JSON.stringify(residual.slice(0, 60))}`);
+
+        return {
+            action: 'insert',
+            line: lineNum,
+            content: residual,
+            deleteText: null,
+            insertText: null,
+            editLine: insertEditLine,
+            editCol: col,
+        };
     }
 
     /**
