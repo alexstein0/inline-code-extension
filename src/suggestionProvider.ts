@@ -361,7 +361,14 @@ export class SuggestionProvider {
         }
         editor.selection = new vscode.Selection(cursorPos, cursorPos);
 
-        this.recordChange(suggestion);
+        // For salvage accepts, push a synthetic canonical history entry
+        // computed from the burstSnapshot diff (covers user typing + salvage).
+        // For normal accepts, use the suggestion's canonical fields directly.
+        if (suggestion.inlineInsertions && suggestion.inlineInsertions.length > 0) {
+            this.flushPendingManualEdits(editor);
+        } else {
+            this.recordChange(suggestion);
+        }
         // Re-baseline snapshot — accepted text is now part of the file but isn't a "user typing" event
         this.burstSnapshot = editor.document.getText();
         this.client.notify('accept', suggestion.action, suggestion.editLine + 1);
