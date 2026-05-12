@@ -137,11 +137,13 @@ export class SuggestionProvider {
                     if (isUndo) {
                         // Pop history entries matching the number of content reversals
                         // and reset the burst snapshot to the current (post-undo) state
+                        const histBefore = this.changeHistory.length;
                         this.burstSnapshot = editor.document.getText();
                         for (let i = 0; i < e.contentChanges.length && this.changeHistory.length > 0; i++) {
                             this.changeHistory.pop();
                             this.historyPreStates.pop();
                         }
+                        console.log(`[InlineCode] Undo: contentChanges=${e.contentChanges.length}, history ${histBefore} → ${this.changeHistory.length}`);
                     }
                     // Fall through: schedule a new prediction for the post-undo state
                     if (this.isEnabled()) {
