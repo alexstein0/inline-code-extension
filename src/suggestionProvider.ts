@@ -6,6 +6,7 @@ import { Suggestion, PredictRequest, HistoryStep, editToSuggestion } from './typ
 const MAX_HISTORY = 5;
 const EDIT_DEBOUNCE_MS = 1000;      // 1s after typing
 const CURSOR_DEBOUNCE_MS = 2000;    // 2s after cursor-only movement
+const HISTORY_IDLE_MS = 30000;      // reset history after this much inactivity
 
 /**
  * Compute insertions to transform `current` → `target`. Returns null if
@@ -62,6 +63,7 @@ export class SuggestionProvider {
     // keeps typing and we want to re-evaluate against the same target without
     // a new model round-trip.
     private cachedTarget: string | null = null;
+    private lastActivityTime: number = Date.now();
     // Snapshot of the document text taken before the current typing burst started.
     // Used to compute a line-diff at flush time, capturing the actual change.
     private burstSnapshot: string | null = null;
@@ -575,9 +577,52 @@ export class SuggestionProvider {
     }
 
     private pushHistory(step: HistoryStep): void {
+        // Reset history if user has been idle too long — stale context isn't useful
+        if (Date.now() - this.lastActivityTime > HISTORY_IDLE_MS && this.changeHistory.length > 0) {
+            console.log(`[InlineCode] History reset: idle > ${HISTORY_IDLE_MS}ms`);
+            this.changeHistory = [];
+        }
+        this.lastActivityTime = Date.now();
+
+        // Try to collapse the new step against the most recent one if they're inverses.
+        // E.g., insert "x" then delete "x" → both should drop.
+        if (this.changeHistory.length > 0) {
+            const last = this.changeHistory[this.changeHistory.length - 1];
+            if (this.areInverses(last, step)) {
+                console.log(`[InlineCode] History: dropping inverse pair`);
+                this.changeHistory.pop();
+                return;  // don't push the new step either
+            }
+        }
+
         this.changeHistory.push(step);
         if (this.changeHistory.length > MAX_HISTORY) {
             this.changeHistory = this.changeHistory.slice(-MAX_HISTORY);
+        }
+    }
+
+    /** True if step `b` would undo step `a`. */
+    private areInverses(a: HistoryStep, b: HistoryStep): boolean {
+        if (a.line !== b.line) { return false; }
+        // insert X followed by delete X
+        if (a.action === 'insert' && b.action === 'delete') {
+            return (a.content ?? '') === (b.content ?? '');
+        }
+        if (a.action === 'delete' && b.action === 'insert') {
+            return (a.content ?? '') === (b.content ?? '');
+        }
+        // replace A→B followed by replace B→A
+        if (a.action === 'replace' && b.action === 'replace') {
+            return (a.delete ?? '') === (b.insert ?? '') && (a.insert ?? '') === (b.delete ?? '');
+        }
+        return false;
+    }
+
+    /** Reset history (called on file-empty transitions, explicit clears, etc.) */
+    private resetHistory(reason: string): void {
+        if (this.changeHistory.length > 0) {
+            console.log(`[InlineCode] History reset: ${reason}`);
+            this.changeHistory = [];
         }
     }
 
@@ -598,6 +643,15 @@ export class SuggestionProvider {
         // Always update the snapshot, even if no diff to compute.
         this.burstSnapshot = current;
         if (before === null || before === current) { return; }
+
+        // File-empty transitions reset history: clearing the file is a fresh start,
+        // and a model-suggested fill from an empty file shouldn't include the prior delete.
+        const becameEmpty = before.length > 0 && current.trim() === '';
+        const wasEmpty = before.trim() === '' && current.length > 0;
+        if (becameEmpty || wasEmpty) {
+            this.resetHistory(becameEmpty ? 'file went empty' : 'file went from empty to populated');
+            return;  // don't record the transition itself as a step
+        }
 
         const step = this.diffToHistoryStep(before, current);
         if (step) {
