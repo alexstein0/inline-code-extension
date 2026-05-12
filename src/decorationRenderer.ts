@@ -274,6 +274,10 @@ export class DecorationRenderer {
         insertions: Array<{ offset: number; text: string }>,
     ): Promise<boolean> {
         if (insertions.length === 0) { return false; }
+
+        // Snapshot cursor offset so we can restore it (preview shouldn't move the cursor)
+        const cursorOffsetBefore = editor.document.offsetAt(editor.selection.active);
+
         // Apply in descending offset order so earlier offsets aren't shifted by later inserts
         const sorted = [...insertions].sort((a, b) => b.offset - a.offset);
         const success = await editor.edit((eb) => {
@@ -284,6 +288,20 @@ export class DecorationRenderer {
         }, { undoStopBefore: false, undoStopAfter: false });
 
         if (!success) { return false; }
+
+        // Restore the cursor to its visual position: original offset shifted by
+        // the total length of inserts that landed STRICTLY BEFORE the cursor.
+        // (Inserts AT the cursor offset should leave the cursor before the ghost
+        // text — user is "still typing here".)
+        let shift = 0;
+        for (const ins of insertions) {
+            if (ins.offset < cursorOffsetBefore) {
+                shift += ins.text.length;
+            }
+        }
+        const restoredOffset = cursorOffsetBefore + shift;
+        const restoredPos = editor.document.positionAt(restoredOffset);
+        editor.selection = new vscode.Selection(restoredPos, restoredPos);
 
         // Decorate inserted regions. Compute adjusted offsets in ascending order.
         const ranges: vscode.Range[] = [];
@@ -340,11 +358,21 @@ export class DecorationRenderer {
             prependedNewline = true;
         }
 
+        // Snapshot cursor offset so we can restore it (preview shouldn't move the cursor)
+        const cursorOffsetBefore = editor.document.offsetAt(editor.selection.active);
+        const insertOffsetForRestore = editor.document.offsetAt(actualEditPos);
+
         const success = await editor.edit((eb) => {
             eb.insert(actualEditPos, content);
         }, { undoStopBefore: false, undoStopAfter: false });
 
         if (!success) { return false; }
+
+        // Restore cursor: shift by content length only if insert was strictly before cursor.
+        const shift = insertOffsetForRestore < cursorOffsetBefore ? content.length : 0;
+        const restoredOffset = cursorOffsetBefore + shift;
+        const restoredPos = editor.document.positionAt(restoredOffset);
+        editor.selection = new vscode.Selection(restoredPos, restoredPos);
 
         this.insertedText = content;
         this.insertedAt = actualEditPos;
