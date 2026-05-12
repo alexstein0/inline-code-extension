@@ -64,6 +64,9 @@ export class SuggestionProvider {
     // a new model round-trip.
     private cachedTarget: string | null = null;
     private lastActivityTime: number = Date.now();
+    // Parallel to changeHistory: the doc state just BEFORE each entry was applied.
+    // Used to net consecutive overlapping entries into a single canonical edit.
+    private historyPreStates: string[] = [];
     // Snapshot of the document text taken before the current typing burst started.
     // Used to compute a line-diff at flush time, capturing the actual change.
     private burstSnapshot: string | null = null;
@@ -137,6 +140,7 @@ export class SuggestionProvider {
                         this.burstSnapshot = editor.document.getText();
                         for (let i = 0; i < e.contentChanges.length && this.changeHistory.length > 0; i++) {
                             this.changeHistory.pop();
+                            this.historyPreStates.pop();
                         }
                     }
                     // Fall through: schedule a new prediction for the post-undo state
@@ -576,11 +580,12 @@ export class SuggestionProvider {
         this.pushHistory(step);
     }
 
-    private pushHistory(step: HistoryStep): void {
+    private pushHistory(step: HistoryStep, preState?: string, postState?: string): void {
         // Reset history if user has been idle too long — stale context isn't useful
         if (Date.now() - this.lastActivityTime > HISTORY_IDLE_MS && this.changeHistory.length > 0) {
             console.log(`[InlineCode] History reset: idle > ${HISTORY_IDLE_MS}ms`);
             this.changeHistory = [];
+            this.historyPreStates = [];
         }
         this.lastActivityTime = Date.now();
 
@@ -591,14 +596,64 @@ export class SuggestionProvider {
             if (this.areInverses(last, step)) {
                 console.log(`[InlineCode] History: dropping inverse pair`);
                 this.changeHistory.pop();
+                this.historyPreStates.pop();
                 return;  // don't push the new step either
             }
         }
 
+        // Net with the previous entry if they overlap on the same line range AND
+        // we have full pre/post states for both. Replace the prior entry with a
+        // single canonical diff from the prior entry's pre-state to the new post-state.
+        if (
+            preState !== undefined && postState !== undefined &&
+            this.changeHistory.length > 0 && this.historyPreStates.length > 0 &&
+            this.stepsOverlap(this.changeHistory[this.changeHistory.length - 1], step)
+        ) {
+            const priorPre = this.historyPreStates[this.historyPreStates.length - 1];
+            const netted = this.diffToHistoryStep(priorPre, postState);
+            if (netted) {
+                console.log(`[InlineCode] History: netting consecutive entries on overlapping lines`);
+                this.changeHistory[this.changeHistory.length - 1] = netted;
+                // Leave priorPre in place — it's still the pre-state of the netted entry
+                return;
+            }
+        }
+
         this.changeHistory.push(step);
+        if (preState !== undefined) {
+            this.historyPreStates.push(preState);
+        } else {
+            // Fallback: use current burstSnapshot as a stand-in (not exact but usable)
+            this.historyPreStates.push(this.burstSnapshot ?? '');
+        }
         if (this.changeHistory.length > MAX_HISTORY) {
             this.changeHistory = this.changeHistory.slice(-MAX_HISTORY);
+            this.historyPreStates = this.historyPreStates.slice(-MAX_HISTORY);
         }
+    }
+
+    /** True if two history steps affect overlapping line ranges. */
+    private stepsOverlap(a: HistoryStep, b: HistoryStep): boolean {
+        const aRange = this.stepLineRange(a);
+        const bRange = this.stepLineRange(b);
+        return aRange.start <= bRange.end && bRange.start <= aRange.end;
+    }
+
+    /** Compute [start, end] (inclusive) line range affected by a step. */
+    private stepLineRange(s: HistoryStep): { start: number; end: number } {
+        const line = s.line;
+        let lines: number;
+        if (s.action === 'insert') {
+            lines = (s.content ?? '').split('\n').filter(l => l.length > 0).length || 1;
+            return { start: line, end: line + lines - 1 };
+        }
+        if (s.action === 'delete') {
+            lines = (s.content ?? '').split('\n').filter(l => l.length > 0).length || 1;
+            return { start: line, end: line + lines - 1 };
+        }
+        // replace
+        const delLines = (s.delete ?? '').split('\n').filter(l => l.length > 0).length || 1;
+        return { start: line, end: line + delLines - 1 };
     }
 
     /** True if step `b` would undo step `a`. */
@@ -655,7 +710,7 @@ export class SuggestionProvider {
 
         const step = this.diffToHistoryStep(before, current);
         if (step) {
-            this.pushHistory(step);
+            this.pushHistory(step, before, current);
         }
     }
 
