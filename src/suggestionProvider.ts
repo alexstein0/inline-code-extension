@@ -174,6 +174,17 @@ export class SuggestionProvider {
                         this.recordManualChange(change);
                     }
                 }
+                // Eager file-empty detection: if the doc becomes empty at ANY
+                // point (even transiently), reset history and re-baseline the
+                // snapshot. Otherwise a user who clears+retypes in one burst
+                // produces a giant misleading "replace X with Y" history entry.
+                if (editor.document.getText().trim() === '') {
+                    if (this.changeHistory.length > 0) {
+                        this.resetHistory('file became empty (eager)');
+                    }
+                    this.burstSnapshot = editor.document.getText();
+                }
+
                 if (this.isEnabled()) {
                     this.schedulePrediction(editor, EDIT_DEBOUNCE_MS);
                 }
