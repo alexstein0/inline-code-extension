@@ -644,13 +644,13 @@ export class SuggestionProvider {
         this.burstSnapshot = current;
         if (before === null || before === current) { return; }
 
-        // File-empty transitions reset history: clearing the file is a fresh start,
-        // and a model-suggested fill from an empty file shouldn't include the prior delete.
+        // File-clear is a fresh start — reset history when the file goes empty.
+        // (We do NOT reset on empty → populated, because that's the user typing
+        // their first edit and we want to record it.)
         const becameEmpty = before.length > 0 && current.trim() === '';
-        const wasEmpty = before.trim() === '' && current.length > 0;
-        if (becameEmpty || wasEmpty) {
-            this.resetHistory(becameEmpty ? 'file went empty' : 'file went from empty to populated');
-            return;  // don't record the transition itself as a step
+        if (becameEmpty) {
+            this.resetHistory('file went empty');
+            return;  // don't record the clear itself as a step
         }
 
         const step = this.diffToHistoryStep(before, current);
